@@ -1,0 +1,80 @@
+# ── Environment & secrets ─────────────────────────────────
+.env
+*.env.*
+
+# ── Python artifacts ──────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# ── Virtual environment ───────────────────────────────────
+venv/
+.venv/
+
+# ── macOS system files ────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ── Celigo integration files ─────────────────────────────
+celigo/
+
+# ── Internal documentation ────────────────────────────────
+ARCHITECTURE.md
+docs/
+
+# ── Editor artifacts ──────────────────────────────────────
+.cursor/
+.claude/
+.idea/
+.vscode/
+*.swp
+
+# ── Excel lock files ──────────────────────────────────────
+~$*
+
+# ── Root-level data/output files (test & enriched outputs)
+QueryResults_403.csv
+QueryResults_403_Enriched.csv
+QueryResults_403_Enriched100.csv
+QueryResults_403_head100lines.csv
+QueryResults_403_head100lines_Enriched.csv
+QueryResults_403_sample100.csv
+QueryResults_403_sample100_Enriched.csv
+QueryResults_837.csv
+QueryResults_837_Enriched.csv
+New Updated List (2).xlsx
+New Updated List (2)_Enriched.xlsx
+New Updated List (2)_backup_20260303_141900.xlsx
+
+# ── Scratch / test / debug scripts ───────────────────────
+batch_check_excel.py
+check_suggested_urls.py
+suggest_urls_for_bad_rows.py
+test_dillards.py
+test_root_domain.py
+test_sftp_connection.py
+debug_batch_repro.py
+
+# ── data/ folder — keep only SKU reference files ─────────
+data/CustomCustomerSearchResults990.csv
+data/error_urls_to_recheck.csv
+data/missing_urls_exact_match.csv
+data/missing_urls_from_custom_customer_search.csv
+data/twisted_x_global_brands_online_sellers.csv
+data/url_validation_full_filtered_online_only.csv
+data/url_validation_full_updated.csv
+data/url_validation_full_updated_backup_before_retest.csv
+data/url_validation_full_updated_ecommerce_no_twisted_x.csv
+data/url_validation_full_updated_ecommerce_no_twisted_x_simple.csv
+data/url_validation_full_updated_filtered_online_only.csv
+data/url_validation_full_updated_no_products_no_online.csv
+data/url_validation_full_updated_no_products_no_online_simple.csv
+
+# ── Any future enriched output files ─────────────────────
+*_Enriched.csv
+*_Enriched.xlsx
+*_enriched.csv
+*_enriched.xlsx
