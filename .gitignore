@@ -22,7 +22,6 @@ venv/
 celigo/
 
 # ── Internal documentation ────────────────────────────────
-ARCHITECTURE.md
 docs/
 
 # ── Editor artifacts ──────────────────────────────────────

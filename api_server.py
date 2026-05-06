@@ -242,38 +242,46 @@ def _navigate_to_best_tx_page(page, base_url: str) -> None:
     # Platform-specific TX search URLs (already built + ordered correctly).
     search_urls = _search_urls_for_platform(page, platform, origin)
 
-    # Generic fallback collection/brand paths tried when platform search fails.
+    # Generic fallback paths tried when platform search fails.
+    # Order matters: brand/collection paths that explicitly name TX come first
+    # so we land on the right page without trying the full generic search.
     fallback_paths = [
-        "/collections/twisted-x",
         "/brands/twisted-x/",
         "/brands/twisted-x",
         "/twisted-x",
         "/product-category/twisted-x/",
+        "/collections/twisted-x",
         "/search?q=Twisted+X",
     ]
     fallbacks = [origin + p for p in fallback_paths]
 
-    _tx_terms = ('twisted-x', 'twistedx', 'twisted x', 'twisted+x')
+    _tx_terms = ('twisted-x', 'twistedx', 'twisted x')
+    # Phrases that indicate a 404/error page — these must not be confused with
+    # a real TX product listing even if the URL contains "twisted".
+    _error_phrases = (
+        'page not found', "page doesn't exist", 'we couldn\'t find this page',
+        'the page you are looking for', 'this page is no longer available',
+        'error 404',
+    )
 
-    def _page_is_tx_relevant(p, url_tried: str) -> bool:
+    def _page_is_tx_relevant(p) -> bool:
         """
-        True when the landed page is likely showing TX products.
-        Two signals accepted independently:
-          1. The URL we navigated to (or the final URL after redirects) contains
-             a TX term — this is the case for named brand/collection paths.
-          2. The page body text contains a TX term — this is the case for
-             platform search results pages.
-        Also requires _page_has_content to filter out empty/404 pages.
+        True when the current page is showing real TX products (not a 404).
+        Requires:
+          - Meaningful body content (_page_has_content)
+          - No 404/error phrases in the body
+          - TX brand terms appear in the final landed URL OR in the page body
         """
         if not _page_has_content(p):
             return False
         try:
-            landed  = p.url.lower()
-            body    = p.inner_text('body').lower()
-            url_low = url_tried.lower()
-            return any(t in landed or t in body or t in url_low for t in _tx_terms)
+            landed = p.url.lower()
+            body   = p.inner_text('body').lower()
         except Exception:
             return False
+        if any(phrase in body for phrase in _error_phrases):
+            return False
+        return any(t in landed or t in body for t in _tx_terms)
 
     def _goto_and_check(url: str) -> bool:
         """Navigate, scroll to trigger lazy loading, return True if TX-relevant."""
@@ -281,7 +289,7 @@ def _navigate_to_best_tx_page(page, base_url: str) -> None:
             page.goto(url, timeout=14000, wait_until='domcontentloaded')
             page.wait_for_timeout(2000)
             _scroll_to_load(page)
-            return _page_is_tx_relevant(page, url)
+            return _page_is_tx_relevant(page)
         except Exception:
             return False
 
@@ -368,13 +376,23 @@ def _scrape_url_sync(url: str, search_term: str = "Twisted X", max_pages: int = 
                 if validation.get("error"):
                     result["errors"].append(validation["error"])
 
-                # Navigate to the page that exposes the most TX products before
-                # extraction. Always run this — even when validation returned
-                # no_products_no_online, the Playwright check may have early-exited
-                # on a homepage with no visible cart (common on Shopify). The caller
-                # already knows from /api/check that TX exists here.
+                # After validation, the browser may be on a footwear detection page
+                # (/boots). Navigate back to where TX products were actually found
+                # so extraction runs on the right page.
+                # found_on_url is the URL where detect_twisted_x located products
+                # (e.g. the search results page after typing "Twisted X" in the search bar).
+                # If TX was not found at all, fall back to the _navigate_to_best_tx_page
+                # heuristic which tries known URL patterns for the platform.
                 if not is_brand_site:
-                    _navigate_to_best_tx_page(page, normalized)
+                    found_on_url = validation.get("found_on_url")
+                    if found_on_url and found_on_url != page.url:
+                        try:
+                            page.goto(found_on_url, timeout=12000, wait_until='domcontentloaded')
+                            page.wait_for_timeout(2000)
+                        except Exception:
+                            pass
+                    elif not found_on_url:
+                        _navigate_to_best_tx_page(page, normalized)
 
                 # Step 2: DOM cleaning + product block extraction (with pagination)
                 all_products = []

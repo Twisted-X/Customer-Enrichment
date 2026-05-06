@@ -115,6 +115,7 @@ def check_url(url: str, page: Page, retries: int = 2) -> Dict:
         'twisted_x_method': None,
         'online_sales': {},
         'final_url': url,
+        'found_on_url': None,   # URL where TX products were actually found
         'redirected': False,
         'error': None,
     }
@@ -188,6 +189,7 @@ def check_url(url: str, page: Page, retries: int = 2) -> Dict:
         result['has_twisted_x'] = tx_check['has_products']
         result['twisted_x_method'] = tx_check['method']
         found_on_url = tx_check.get('found_on_url', final_url)
+        result['found_on_url'] = found_on_url   # expose for scraper to navigate back
         if tx_check['error']:
             result['error'] = tx_check['error']
 
