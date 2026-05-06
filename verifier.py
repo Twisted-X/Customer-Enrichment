@@ -8,11 +8,46 @@ import re
 from typing import Dict, List
 from difflib import SequenceMatcher
 
+from brand_config import ALL_INDICATORS as _BRAND_INDICATORS
+
+
+# ── Confidence scoring weights ───────────────────────────────────────────────
+# A product accumulates points across signals; the totals collapse into a
+# tri-level confidence string ('high' / 'medium' / 'low'). The weights below
+# are heuristic — they reflect "what would a reviewer feel reassured by?":
+#   - Brand explicitly in the product name is the strongest single signal.
+#   - SKU presence is the next strongest (a fabricated SKU would have to match
+#     the regex shape and be plausible).
+#   - Each individual auxiliary field (price, URL, evidence snippet) adds 1.
+#
+# Adjust these only with care — they are surfaced in /api/verify responses and
+# any change shifts what reviewers see at the boundary.
+_W_BRAND_EXACT = 3        # "twisted x" appears in product name
+_W_BRAND_PARTIAL = 1      # only "twisted" appears in product name
+_W_HAS_PRICE = 1
+_W_HAS_SKU = 2
+_W_HAS_URL = 1
+_W_HAS_NAME_SNIPPET = 1
+_W_HAS_PRICE_SNIPPET = 1
+
+_HIGH_THRESHOLD = 6   # "name + sku + price + url + a snippet" reaches 6
+_MEDIUM_THRESHOLD = 3 # "name + at least one supporting field" reaches 3
+
+# ── Name-vs-source fuzzy match thresholds ────────────────────────────────────
+# When the LLM-extracted name doesn't appear verbatim in the source block,
+# we fall back to a fuzzy ratio. NAME_SIMILARITY_FLOOR is the minimum
+# difflib SequenceMatcher ratio at which we still consider the name a plausible
+# match (below it, we flag the product). 0.3 is intentionally permissive
+# because names are often truncated or reformatted on retailer sites.
+NAME_SIMILARITY_FLOOR = 0.3
+NAME_PREFIX_FOR_MATCH = 50      # only the first N chars of extracted name participate
+SOURCE_PREFIX_FOR_MATCH = 200   # ...compared against the first M chars of source text
+
 
 def calculate_confidence(product: Dict) -> str:
     """
     Calculate confidence level for a verified product.
-    
+
     Returns:
         'high', 'medium', or 'low'
     """
@@ -20,26 +55,26 @@ def calculate_confidence(product: Dict) -> str:
 
     name = product.get("name", "")
     if "twisted x" in name.lower():
-        score += 3
+        score += _W_BRAND_EXACT
     elif "twisted" in name.lower():
-        score += 1
+        score += _W_BRAND_PARTIAL
 
     if product.get("price"):
-        score += 1
+        score += _W_HAS_PRICE
     if product.get("sku"):
-        score += 2
+        score += _W_HAS_SKU
     if product.get("product_url"):
-        score += 1
+        score += _W_HAS_URL
 
     evidence = product.get("evidence", {})
     if evidence.get("name_snippet"):
-        score += 1
+        score += _W_HAS_NAME_SNIPPET
     if evidence.get("price_snippet"):
-        score += 1
+        score += _W_HAS_PRICE_SNIPPET
 
-    if score >= 6:
+    if score >= _HIGH_THRESHOLD:
         return "high"
-    elif score >= 3:
+    elif score >= _MEDIUM_THRESHOLD:
         return "medium"
     else:
         return "low"
@@ -84,8 +119,12 @@ def verify_product_against_block(extracted_product: Dict, original_block: Dict) 
             if len(name_words) >= 2:
                 partial_name = " ".join(name_words)
                 if partial_name not in original_text:
-                    similarity = SequenceMatcher(None, name_lower[:50], original_text[:200]).ratio()
-                    if similarity < 0.3:
+                    similarity = SequenceMatcher(
+                        None,
+                        name_lower[:NAME_PREFIX_FOR_MATCH],
+                        original_text[:SOURCE_PREFIX_FOR_MATCH],
+                    ).ratio()
+                    if similarity < NAME_SIMILARITY_FLOOR:
                         issues.append(f"Name '{name[:50]}...' not found in source block")
             else:
                 issues.append(f"Name '{name[:50]}...' not found in source block")
@@ -121,21 +160,10 @@ def verify_product_against_block(extracted_product: Dict, original_block: Dict) 
         if not img_found:
             issues.append("Image URL not found in source block images")
 
-    # Brand verification
+    # Brand verification — single source of truth in config/brand_indicators.json
     name_lower = name.lower() if name else ""
-    brand_indicators = [
-        "twisted x", "twistedx", "twisted x work",
-        "black star", "black star boots",
-        "cellsole", "cell sole", "cellstretch",
-        "hooey",
-        "tech x", "tech-x", "feather x",
-        "chukka", "driving moc", "driving moccasin",
-        "top hand", "zero-x", "zero x", "ruff stock",
-        "all around", "horseman", "western work"
-    ]
-
-    name_has_brand = any(ind in name_lower for ind in brand_indicators)
-    block_has_brand = any(ind in original_text or ind in original_html for ind in brand_indicators)
+    name_has_brand = any(ind in name_lower for ind in _BRAND_INDICATORS)
+    block_has_brand = any(ind in original_text or ind in original_html for ind in _BRAND_INDICATORS)
 
     if not name_has_brand and not block_has_brand:
         issues.append("Cannot confirm this is a Twisted X Global Brands product")

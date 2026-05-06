@@ -1,0 +1,32 @@
+{
+  "_comment": "Single source of truth for Twisted X Global Brands keywords. Used by verifier.py, api_server.py, and the LLM extraction prompts. To add a new brand or product line, edit this file ONLY — every consumer reads from here.",
+  "brands": [
+    "twisted x",
+    "twistedx",
+    "twisted x work",
+    "black star",
+    "black star boots",
+    "cellsole",
+    "cell sole",
+    "hooey"
+  ],
+  "product_lines": [
+    "cellstretch",
+    "tech x",
+    "tech-x",
+    "feather x",
+    "ultralite x",
+    "zero-x",
+    "zero x",
+    "ecotwx",
+    "top hand",
+    "chukka",
+    "driving moc",
+    "driving moccasin",
+    "ruff stock",
+    "all around",
+    "horseman",
+    "western work"
+  ],
+  "primary_brand_pair": ["twisted x", "twistedx"]
+}

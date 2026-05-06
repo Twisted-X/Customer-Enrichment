@@ -3,6 +3,9 @@ Configuration for Twisted X Scraper API
 """
 import os
 import csv
+import logging
+
+log = logging.getLogger(__name__)
 
 # Playwright settings
 HEADLESS = True
@@ -77,20 +80,30 @@ def get_retailer_name(url: str) -> str:
 # Loaded once at import time. Used by /api/check for verification.
 # Covers: Twisted X, Black Star, Tamarindo Footwear, Wrangler Footwear
 
+# Source files in DATA_DIR (overridable via env vars for non-default deployments)
+SKU_XLSX_FILENAME = os.getenv("SKU_XLSX_FILENAME", "twisted_x_skus_v107.xlsx")
+SKU_CSV_FILENAME = os.getenv("SKU_CSV_FILENAME", "twisted_x_sku.csv")
+
+# Minimum count below which the SKU database is considered broken; raises at
+# import time so a misconfigured deployment fails fast instead of silently
+# returning empty matches.
+MIN_EXPECTED_STYLE_CODES = int(os.getenv("MIN_EXPECTED_STYLE_CODES", "1000"))
+
+
 def _load_style_codes() -> set:
     """
     Load unique ParentStyle codes from the full SKU xlsx (all sheets)
     with CSV fallback. These are product fingerprints for verification.
     Returns a set of uppercase style codes for O(1) lookup.
     """
-    styles = set()
+    styles: set = set()
 
-    # Primary source: full xlsx with all 4 sheets (~52K SKUs, ~3K styles)
-    xlsx_path = os.path.join(DATA_DIR, "PowerAppsItemSearchDONOTEDITResults107 copy 2.xls.xlsx")
+    xlsx_path = os.path.join(DATA_DIR, SKU_XLSX_FILENAME)
     if os.path.exists(xlsx_path):
         try:
             import openpyxl
             wb = openpyxl.load_workbook(xlsx_path, read_only=True)
+            sheet_count = len(wb.sheetnames)
             for sheet_name in wb.sheetnames:
                 ws = wb[sheet_name]
                 ps_idx = -1
@@ -104,13 +117,12 @@ def _load_style_codes() -> set:
                         if ":" not in style and len(style) >= 4:
                             styles.add(style.upper())
             wb.close()
-            print(f"[config] Loaded {len(styles)} style codes from xlsx ({len(wb.sheetnames)} sheets)")
+            log.info("Loaded %d style codes from xlsx (%d sheets)", len(styles), sheet_count)
             return styles
         except Exception as e:
-            print(f"[config] WARNING: xlsx load failed ({e}), falling back to CSV")
+            log.warning("xlsx load failed (%s), falling back to CSV", e)
 
-    # Fallback: original CSV
-    sku_csv = os.path.join(DATA_DIR, "twsited_x_sku.csv")
+    sku_csv = os.path.join(DATA_DIR, SKU_CSV_FILENAME)
     if os.path.exists(sku_csv):
         try:
             with open(sku_csv, "r", encoding="utf-8") as f:
@@ -119,13 +131,20 @@ def _load_style_codes() -> set:
                     style = row.get("ParentStyle", "").strip()
                     if style and ":" not in style and len(style) >= 4:
                         styles.add(style.upper())
-            print(f"[config] Loaded {len(styles)} style codes from CSV (fallback)")
+            log.info("Loaded %d style codes from CSV (fallback)", len(styles))
         except Exception as e:
-            print(f"[config] WARNING: Failed to load SKU file: {e}")
+            log.error("Failed to load SKU file %s: %s", sku_csv, e)
     else:
-        print(f"[config] WARNING: No SKU files found in {DATA_DIR}")
+        log.error("No SKU files found in %s", DATA_DIR)
 
     return styles
 
 
 TX_STYLE_CODES = _load_style_codes()
+
+if len(TX_STYLE_CODES) < MIN_EXPECTED_STYLE_CODES:
+    raise RuntimeError(
+        f"SKU database failed to load: got {len(TX_STYLE_CODES)} style codes, "
+        f"expected at least {MIN_EXPECTED_STYLE_CODES}. "
+        f"Check that {SKU_XLSX_FILENAME} or {SKU_CSV_FILENAME} exists in {DATA_DIR}."
+    )

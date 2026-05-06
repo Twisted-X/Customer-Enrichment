@@ -22,7 +22,7 @@ class ScrapeRequestNew(BaseModel):
     """Request for POST /api/scrape"""
     url: str = Field(..., description="Retailer URL to scrape")
     search_term: str = Field(default="Twisted X", description="Search term to use")
-    max_pages: int = Field(default=10, description="Maximum pagination pages to process")
+    max_pages: int = Field(default=15, description="Maximum pagination pages to process")
     timeout: int = Field(default=30000, description="Page load timeout in milliseconds")
 
 

@@ -13,7 +13,7 @@ from typing import Dict, List
 from playwright.sync_api import Page
 
 # ── Payload limits ──
-MAX_PRODUCTS = 100
+MAX_PRODUCTS = 300
 MAX_TEXT_PER_BLOCK = 500
 MAX_HTML_PER_BLOCK = 500
 MAX_IMAGES_PER_BLOCK = 2
@@ -283,6 +283,22 @@ def clean_and_extract(page: Page) -> Dict:
     All blocks are payload-capped for production use.
     """
 
+    # Scroll to the bottom in steps so lazy-loaded products render before extraction.
+    try:
+        page.evaluate("""async () => {
+            const step = Math.floor(window.innerHeight * 0.8);
+            let pos = 0;
+            while (pos < document.body.scrollHeight) {
+                window.scrollTo(0, pos);
+                await new Promise(r => setTimeout(r, 300));
+                pos += step;
+            }
+            window.scrollTo(0, 0);
+        }""")
+        page.wait_for_timeout(1000)
+    except Exception:
+        pass
+
     # ══════════════════════════════════════════════════════
     # Pass 1: Targeted CSS selector extraction
     # ══════════════════════════════════════════════════════
@@ -303,10 +319,14 @@ def clean_and_extract(page: Page) -> Dict:
                             alt: img.alt || ''
                         })).filter(img => img.src && img.src.startsWith('http'));
 
-                        const links = [...el.querySelectorAll('a[href]')].map(a => ({
+                        // Include el itself if it's an <a> — product cards are often fully wrapped in <a>
+                        const linkEls = (el.tagName === 'A' && el.href)
+                            ? [el, ...el.querySelectorAll('a[href]')]
+                            : [...el.querySelectorAll('a[href]')];
+                        const links = linkEls.map(a => ({
                             href: a.href,
                             text: a.textContent.trim().substring(0, 100)
-                        })).filter(l => l.text.length > 0 && l.href.startsWith('http'));
+                        })).filter(l => l.href.startsWith('http'));
 
                         return {
                             text: el.innerText.trim(),
