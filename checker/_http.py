@@ -10,24 +10,11 @@ sufficient due to false-positive risk (press mentions, 'brands we carry' pages).
 from __future__ import annotations
 
 import logging
-import os
 
-import requests
-
+from ._http_client import http_get
 from ._scanners import scan_html_for_skus
 
 log = logging.getLogger(__name__)
-
-# Shared HTTP headers used by Layer-1 and Layer-2
-HTTP_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/131.0.0.0 Safari/537.36"
-)
-HTTP_HEADERS = {"User-Agent": HTTP_UA}
-
-GOOGLE_CSE_API_KEY = os.environ.get("GOOGLE_CSE_API_KEY", "")
-GOOGLE_CSE_CX      = os.environ.get("GOOGLE_CSE_CX", "")
 
 _BLOCK_SIGNALS = [
     "checking your browser", "cloudflare", "verify you are human",
@@ -48,8 +35,10 @@ def http_first_check(url: str) -> dict:
     Never raises.
     """
     try:
-        resp = requests.get(url, timeout=10, headers=HTTP_HEADERS, allow_redirects=True)
+        resp = http_get(url, timeout=10)
 
+        if resp is None:
+            return dict(_FAIL)
         if resp.status_code >= 400:
             return dict(_FAIL)
         if "text/html" not in resp.headers.get("content-type", ""):

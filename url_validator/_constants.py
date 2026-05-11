@@ -24,13 +24,6 @@ SEARCH_GROWTH_RATIO = 1.2
 # Minimum delay between URL requests to reduce WAF trigger risk.
 _RATE_LIMIT_S = 0.5
 
-# Chrome desktop UA to reduce bot-detection blocks on retailer sites.
-_BROWSER_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/131.0.0.0 Safari/537.36"
-)
-
 # Generic brand words that only count as a TX hit when at least one
 # non-generic brand indicator is also present on the same page.
 _GENERIC_BRAND_WORDS = {"hooey"}

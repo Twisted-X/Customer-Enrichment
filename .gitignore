@@ -30,6 +30,7 @@ docs/
 .idea/
 .vscode/
 *.swp
+.dev_cache/
 
 # ── Excel lock files ──────────────────────────────────────
 ~$*

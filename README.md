@@ -31,11 +31,13 @@ checker/                    3-layer retailer detection package
   _types.py                 TypedDict definitions + result factories
 
 enrichment/                 Customer enrichment package
-  __init__.py               run_pipeline() — public entry point
-  _pipeline.py              Orchestrator — 8 named steps
+  __init__.py               run_pipeline(), enrich_single_customer() — public entry points
+  _pipeline.py              Orchestrator — 8 named steps (per-row enrichment via _enrich_single)
+  _enrich_single.py         Single-record orchestration: Address Validation → Places → Text Search
+  _address_validation.py    Google Address Validation API + location-biased Text Search wrappers
   _config.py                All env vars and constants
   _url.py                   Async URL pinging (aiohttp)
-  _places.py                Google Places API integration
+  _places.py                Google Places Text Search API integration
   _address.py               Address normalisation + matching
   _company.py               Company deduplication + branch logic
   _retail.py                Retail type classification + known domain lookup
@@ -155,6 +157,19 @@ curl -X POST http://localhost:8000/api/check \
 | `GET /health` | Returns `{"status": "healthy", "timestamp": "..."}` |
 | `GET /api/test` | Smoke test — confirms SKU database is loaded |
 
+**Enrichment endpoints** (all require `X-API-Key` header matching `ENRICH_API_KEY` env var):
+
+| Endpoint | What it does |
+|----------|-------------|
+| `POST /api/enrich` | Enrich one customer record: Address Validation → Places Details → Text Search fallback |
+| `POST /api/enrich/batch` | Enrich up to 100 records concurrently (same flow as single, results in request order) |
+| `POST /api/enrich/pipeline` | Run the full CSV batch pipeline (reads `INPUT_FILE`, writes `OUTPUT_FILE`; long-running) |
+| `POST /api/enrich/ttl-check` | Which records are stale and need re-enrichment? (pure date logic, no API calls) |
+| `POST /api/enrich/url-ping` | Are these URLs still alive? Returns alive/dead/missing buckets with HTTP codes |
+| `POST /api/enrich/address-validate` | Debug: geocode a single address (Address Validation API only, no Places lookup) |
+| `POST /api/enrich/online-status` | Compute NetSuite `online_sales_status` dropdown value from enrichment signals |
+| `POST /api/enrich/classify-retail` | Classify a business as `retail` / `not_retail` / `unknown` (pure logic, no API calls) |
+
 ---
 
 ## Running the enrichment pipeline
@@ -190,7 +205,7 @@ at startup if it is missing.
 | `sells_shoes` | `yes` / `no` / `unknown` |
 | `sells_twisted_x` | `yes` / `no` / `unknown` |
 | `online_sales_status` | NetSuite dropdown value (see below) |
-| `enrichment_source` | `hybrid_full` / `google_places` / `url_only` / `enrichment_error` |
+| `enrichment_source` | `address_validation` / `text_search` / `not_found` / `enrichment_error` |
 | `last_enrichment_date` | ISO date of this run |
 
 **NetSuite `online_sales_status` mapping:**
@@ -237,14 +252,15 @@ full list with descriptions. Key variables:
 
 | Variable | Required for | What it does |
 |----------|-------------|-------------|
-| `GOOGLE_PLACES_API_KEY` | Enrichment pipeline | Google Places Text Search |
+| `GOOGLE_PLACES_API_KEY` | Enrichment pipeline + enrich API | Google Places Text Search + Address Validation |
+| `ENRICH_API_KEY` | All `/api/enrich/*` endpoints | Shared secret — pass as `X-API-Key` header |
 | `GOOGLE_CSE_API_KEY` + `GOOGLE_CSE_CX` | URL recovery script | Fallback URL search |
 | `USE_SFTP` | Enrichment pipeline | `true` = SFTP mode, `false` = local files |
 | `INPUT_FILE` | Local mode | CSV to read (default: `QueryResults_837.csv`) |
 | `OUTPUT_FILE` | Local mode | CSV to write (default: `QueryResults_837_Enriched.csv`) |
 | `SFTP_HOST/USER/PASSWORD` | SFTP mode | File server credentials |
 | `ENABLE_PRODUCT_CHECK` | Enrichment pipeline | `true` = call `/api/check` per URL |
-| `ENRICHMENT_TTL_DAYS` | Enrichment pipeline | Skip rows enriched within N days (default 90) |
+| `ENRICHMENT_TTL_DAYS` | Enrichment pipeline + ttl-check API | Skip rows enriched within N days (default 30) |
 
 ---
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 import logging
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from brand_config import PRIMARY_BRAND_PAIR
 from ._types import ScanResult, SampleProduct, empty_scan
@@ -128,6 +128,11 @@ def scan_html_for_skus(html: str) -> ScanResult:
     Used by Layer-1 (HTTP-first) to avoid launching Playwright for sites
     that render products in static HTML.
 
+    Sample extraction tries two sources in order:
+      1. href attributes — SKU in product link paths (e.g. /products/wdm0003-boot)
+      2. img src attributes — SKU in image filenames (e.g. wdm0003__42223.jpg),
+         with a window scan to find the nearest href and text for the product card
+
     Returns a ScanResult. Never raises.
     """
     from config import TX_STYLE_CODES
@@ -142,16 +147,61 @@ def scan_html_for_skus(html: str) -> ScanResult:
         return empty_scan()
 
     matched_in = [f"{code} in page HTML" for code in sorted(matched_codes)[:10]]
-
-    # Collect hrefs containing a matched code as minimal sample products
     code_pattern = re.compile('|'.join(re.escape(c) for c in matched_codes), re.IGNORECASE)
+
+    # Source 1: SKU appears in an href (product link paths)
     hrefs = re.findall(r'href=["\']([^"\']+)["\']', cleaned)
     samples: List[SampleProduct] = [
-        {"product_url": h, "name": "", "price": "", "sku": "", "image": ""}
+        {"product_url": h, "name": "", "price": "", "sku": code_pattern.search(h).group().upper() if code_pattern.search(h) else "", "image": ""}
         for h in hrefs if code_pattern.search(h)
     ][:5]
 
-    return {"matched_codes": matched_codes, "matched_in": matched_in[:5], "sample_products": samples}
+    if len(samples) < 5:
+        # Source 2: SKU appears in img src (e.g. image filenames like wdm0003__42223.jpg).
+        # Walk a context window around each img tag to recover the nearest href and
+        # any visible product name text.
+        seen_skus = {s["sku"] for s in samples}
+        src_pattern = re.compile(r'src=["\']([^"\']+)["\']', re.IGNORECASE)
+        for src_match in src_pattern.finditer(cleaned):
+            if len(samples) >= 5:
+                break
+            src_val = src_match.group(1)
+            sku_hit = code_pattern.search(src_val)
+            if not sku_hit:
+                continue
+            sku = sku_hit.group().upper()
+            if sku in seen_skus:
+                continue
+            seen_skus.add(sku)
+
+            # Look at a window of HTML surrounding the <img> tag for context
+            win_start = max(0, src_match.start() - 600)
+            win_end   = min(len(cleaned), src_match.end() + 300)
+            window    = cleaned[win_start:win_end]
+
+            href_hit  = re.search(r'href=["\']([^"\']+)["\']', window)
+            product_url = href_hit.group(1) if href_hit else ""
+
+            # Try to extract a product name from surrounding visible text
+            # (strip tags, collapse whitespace, take first meaningful chunk)
+            text_only = re.sub(r'<[^>]+>', ' ', window)
+            text_only = re.sub(r'\s+', ' ', text_only).strip()
+            name = ""
+            for chunk in text_only.split():
+                if len(name) > 60:
+                    break
+                if chunk and not chunk.startswith(('$', 'http', 'data:')):
+                    name = (name + ' ' + chunk).strip()
+
+            samples.append({
+                "product_url": product_url,
+                "name":        name[:80],
+                "price":       "",
+                "sku":         sku,
+                "image":       src_val,
+            })
+
+    return {"matched_codes": matched_codes, "matched_in": matched_in[:5], "sample_products": samples[:5]}
 
 
 def find_brand_in_product_context(page) -> Tuple[bool, List[SampleProduct]]:
@@ -172,24 +222,40 @@ def find_brand_in_product_context(page) -> Tuple[bool, List[SampleProduct]]:
         log.warning("find_brand_in_product_context error: %s", exc)
         return (False, [])
 
-
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _extract_samples_via_links(page, page_text: str, matched_codes: set) -> List[SampleProduct]:
+def _extract_samples_via_links(
+    page,
+    page_text: str,
+    matched_codes: set,
+    limit: Optional[int] = 5,
+) -> List[SampleProduct]:
     """
     Try link-based extraction first (SKU in link text/href), then fall back to
     text-based extraction (SKU in page_text, DOM walk for image+URL).
+
+    Args:
+        limit: Maximum products to return.  Pass ``None`` for no cap.
     """
-    samples = _link_based_samples(page, matched_codes)
+    samples = _link_based_samples(page, matched_codes, limit=limit)
     if not samples:
-        samples = _text_based_samples(page, page_text, matched_codes)
+        samples = _text_based_samples(page, page_text, matched_codes, limit=limit)
     return samples
 
 
-def _link_based_samples(page, matched_codes: set) -> List[SampleProduct]:
-    """Walk <a href> elements; return those whose text or href contain a matched SKU."""
+def _link_based_samples(
+    page,
+    matched_codes: set,
+    limit: Optional[int] = 5,
+) -> List[SampleProduct]:
+    """
+    Walk <a href> elements; return those whose text or href contain a matched SKU.
+
+    Args:
+        limit: Maximum products to return.  Pass ``None`` for no cap.
+    """
     samples: List[SampleProduct] = []
     seen: set = set()
     code_pattern = re.compile('|'.join(re.escape(c) for c in matched_codes), re.IGNORECASE)
@@ -219,7 +285,7 @@ def _link_based_samples(page, matched_codes: set) -> List[SampleProduct]:
 
                 samples.append({"name": name, "price": price, "sku": sku,
                                  "image": image, "product_url": href})
-                if len(samples) >= 5:
+                if limit is not None and len(samples) >= limit:
                     break
             except Exception:
                 continue
@@ -229,16 +295,24 @@ def _link_based_samples(page, matched_codes: set) -> List[SampleProduct]:
     return samples
 
 
-def _text_based_samples(page, page_text: str, matched_codes: set) -> List[SampleProduct]:
+def _text_based_samples(
+    page,
+    page_text: str,
+    matched_codes: set,
+    limit: Optional[int] = 5,
+) -> List[SampleProduct]:
     """
     Fallback: find each matched SKU in page_text, then DOM-walk to recover
     the image URL and product link from the surrounding element.
+
+    Args:
+        limit: Maximum products to return.  Pass ``None`` for no cap.
     """
     samples: List[SampleProduct] = []
     lines = [l.strip() for l in page_text.split('\n') if l.strip()]
 
     for i, line in enumerate(lines):
-        for code in list(matched_codes)[:20]:
+        for code in list(matched_codes):
             if code.lower() not in line.lower():
                 continue
 
@@ -258,7 +332,7 @@ def _text_based_samples(page, page_text: str, matched_codes: set) -> List[Sample
                              "image": image, "product_url": product_url})
             break
 
-        if len(samples) >= 5:
+        if limit is not None and len(samples) >= limit:
             break
 
     return samples
@@ -301,7 +375,6 @@ def _dom_walk_for_image_and_url(page, sku: str) -> Tuple[str, str]:
     Find the DOM text node containing `sku` (skipping script/style tags),
     walk up to a container that has an img, and return (image_src, product_href).
     """
-    SKIP = {'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'META', 'HEAD'}
     try:
         result = page.evaluate("""(sku) => {
             const SKIP = new Set(["SCRIPT","STYLE","NOSCRIPT","TEMPLATE","META","HEAD"]);

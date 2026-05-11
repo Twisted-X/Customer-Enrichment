@@ -11,6 +11,18 @@ log = logging.getLogger(__name__)
 HEADLESS = True
 TIMEOUT_MS = 30000  # 30 seconds page load timeout
 
+# 2Captcha API key — used as a fallback solver for Cloudflare Turnstile challenges.
+# Get your key at https://2captcha.com  (~$3 per 1,000 Turnstile solves).
+# Leave blank to disable the 2Captcha fallback (iframe-click solver still runs).
+TWO_CAPTCHA_API_KEY = os.getenv("TWO_CAPTCHA_API_KEY", "")
+
+# Optional development response cache for HTTP fetches.
+DEV_CACHE_ENABLED = os.getenv("SCRAPER_DEV_CACHE", "").lower() in ("1", "true", "yes")
+DEV_CACHE_DIR = os.getenv("SCRAPER_DEV_CACHE_DIR", ".dev_cache")
+
+# Optional comma-separated proxy list used for HTTP/browser rotation.
+PROXY_LIST = [p.strip() for p in os.getenv("PROXY_LIST", "").split(",") if p.strip()]
+
 # Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")

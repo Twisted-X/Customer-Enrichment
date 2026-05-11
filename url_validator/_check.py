@@ -11,7 +11,9 @@ import logging
 from typing import Dict
 from urllib.parse import urlparse
 
-from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
+from patchright.sync_api import Page, TimeoutError as PlaywrightTimeout
+
+from browser_utils import goto_safe as _goto_safe
 
 from ._constants import VALIDATION_TIMEOUT, _PHYSICAL_STORE_PHRASES
 from ._brand import _classify_brand_site
@@ -24,7 +26,7 @@ log = logging.getLogger(__name__)
 def _has_physical_store_indicators(page: Page) -> bool:
     """Return True if the page contains typical physical-store language."""
     try:
-        pt = page.inner_text('body').lower()
+        pt = page.inner_text('body', timeout=8_000).lower()
         return any(p in pt for p in _PHYSICAL_STORE_PHRASES)
     except Exception:
         return False
@@ -79,12 +81,22 @@ def _apply_brand_site_overrides(
         result['sells_online'] = online_check['sells_online']
 
 
-def check_url(url: str, page: Page, retries: int = 2) -> Dict:
+def check_url(url: str, page: Page, retries: int = 2, skip_tx_check: bool = False) -> Dict:
     """
     Full validation: Twisted X detection + online sales + footwear detection.
 
     Tracks redirects and applies brand-site overrides so informational pages
     that redirect to twistedx.com are not credited as online sellers.
+
+    Args:
+        url:           Retailer URL to validate.
+        page:          Live Playwright page (caller owns the browser context).
+        retries:       How many extra navigation attempts on transient errors.
+        skip_tx_check: When True, skip detect_twisted_x and the early-exit
+                       e-commerce gate — only runs detect_online_sales_capability
+                       and detect_footwear. Use this from checker._playwright
+                       which runs its own authoritative SKU scan so the duplicate
+                       detect_twisted_x pass is wasted work.
 
     Returns:
         {
@@ -121,23 +133,21 @@ def check_url(url: str, page: Page, retries: int = 2) -> Dict:
     }
 
     # ── Navigation with retries ────────────────────────────────────────────
-    wait_strategies = ['domcontentloaded', 'load', 'load']
     navigation_success = False
     last_error = None
 
     for attempt in range(retries + 1):
-        wait_strategy = wait_strategies[min(attempt, len(wait_strategies) - 1)]
         timeout = VALIDATION_TIMEOUT + (attempt * 5000)
         try:
-            page.goto(url, timeout=timeout, wait_until=wait_strategy)
-            page.wait_for_timeout(3000)
+            _goto_safe(page, url, timeout=timeout)
+            page.wait_for_timeout(1000)
             if page.url and page.url != 'about:blank':
                 navigation_success = True
                 break
             else:
                 last_error = 'Navigation resulted in blank page'
         except PlaywrightTimeout:
-            last_error = f'Timeout ({wait_strategy}, attempt {attempt + 1}/{retries + 1})'
+            last_error = f'Timeout (attempt {attempt + 1}/{retries + 1})'
             if attempt < retries:
                 page.wait_for_timeout(2000)
         except Exception as e:
@@ -163,48 +173,85 @@ def check_url(url: str, page: Page, retries: int = 2) -> Dict:
         result['final_url'] = final_url
         result['redirected'] = (final_url != url)
 
-        page_text = page.inner_text('body').lower()
+        try:
+            # Use a generous timeout — JS-heavy sites (Magento, SPA) render
+            # body content asynchronously and may need >10 s after load event.
+            page_text = page.inner_text('body', timeout=30_000).lower()
+        except Exception:
+            # Challenge pages (Imperva, CF) can make inner_text hang.
+            # Fall back to raw HTML text stripping.
+            try:
+                import re as _re
+                page_text = _re.sub(r'<[^>]+>', ' ', page.content()).lower()
+            except Exception:
+                page_text = ''
         is_official_brand, is_brand_site = _classify_brand_site(final_url, page_text, url)
 
         _close_popups(page)
         page.wait_for_timeout(500)
 
-        # Early exit: if no e-commerce signals, skip the expensive TX and
-        # footwear checks (saves 30-60 s per URL on non-e-commerce sites).
-        if not is_official_brand:
-            quick_online = detect_online_sales_capability(page)
-            if not quick_online['sells_online']:
-                result.update(
-                    sells_online=False,
-                    sells_footwear=False,
-                    has_twisted_x=False,
-                    online_sales=quick_online,
-                    combined_status='no_products_no_online',
-                    has_physical_store_indicators=_has_physical_store_indicators(page),
-                )
-                return result
+        # _cached_online_check holds a result from the early-exit gate check so
+        # we never re-run detect_online_sales_capability on a page that may have
+        # been WAF-blocked by TX-detection navigations (Imperva / Cloudflare can
+        # block subsequent requests even when the first page load succeeded).
+        _cached_online_check = None
 
-        # Check 1: Twisted X detection (may navigate to search/category pages)
-        tx_check = detect_twisted_x(page, final_url, return_page_info=True)
-        result['has_twisted_x'] = tx_check['has_products']
-        result['twisted_x_method'] = tx_check['method']
-        found_on_url = tx_check.get('found_on_url', final_url)
-        result['found_on_url'] = found_on_url   # expose for scraper to navigate back
-        if tx_check['error']:
-            result['error'] = tx_check['error']
+        if not skip_tx_check:
+            # Early exit: if no e-commerce signals, skip the expensive TX and
+            # footwear checks (saves 30-60 s per URL on non-e-commerce sites).
+            # Skipped when the checker runs its own authoritative SKU scan.
+            if not is_official_brand:
+                quick_online = detect_online_sales_capability(page)
+                _cached_online_check = quick_online   # cache — page is clean here
+                if not quick_online['sells_online']:
+                    result.update(
+                        sells_online=False,
+                        sells_footwear=None,   # detection was skipped — unknown, not False
+                        has_twisted_x=False,
+                        online_sales=quick_online,
+                        combined_status='no_products_no_online',
+                        has_physical_store_indicators=_has_physical_store_indicators(page),
+                    )
+                    return result
 
-        # Check 2: Online sales — evaluated on the page where TX was found
-        # (search/category page), or the homepage if products were found there.
-        try:
-            target_url = found_on_url if (found_on_url and found_on_url != final_url) else final_url
-            if page.url != target_url:
-                page.goto(target_url, timeout=8000, wait_until='domcontentloaded')
-                page.wait_for_timeout(2000)
-                _close_popups(page)
-        except Exception:
-            pass  # Continue on current page if navigation fails
+            # Check 1: Twisted X detection (may navigate to search/category pages)
+            tx_check = detect_twisted_x(page, final_url, return_page_info=True)
+            result['has_twisted_x'] = tx_check['has_products']
+            result['twisted_x_method'] = tx_check['method']
+            found_on_url = tx_check.get('found_on_url', final_url)
+            result['found_on_url'] = found_on_url   # expose for scraper to navigate back
+            if tx_check['error']:
+                result['error'] = tx_check['error']
 
-        online_check = detect_online_sales_capability(page)
+            # Navigate back to where TX was found before running online sales check.
+            try:
+                target_url = found_on_url if (found_on_url and found_on_url != final_url) else final_url
+                if page.url != target_url:
+                    _goto_safe(page, target_url, timeout=12_000)
+                    page.wait_for_timeout(1000)
+                    _close_popups(page)
+            except Exception:
+                pass  # Continue on current page if navigation fails
+        else:
+            # TX check skipped — caller (checker._playwright) owns TX detection.
+            # Navigate back to the homepage so online/footwear checks run there.
+            if page.url != final_url:
+                try:
+                    _goto_safe(page, final_url, timeout=12_000)
+                    page.wait_for_timeout(1000)
+                    _close_popups(page)
+                except Exception:
+                    pass
+
+        # Check 2: Online sales capability.
+        # Reuse the cached result from the early-exit gate when available — TX
+        # detection navigations can leave the browser on a WAF-blocked page and
+        # a fresh detect_online_sales_capability call would see empty content.
+        if _cached_online_check is not None:
+            online_check = _cached_online_check
+            log.debug("check_url: reusing cached online_check (%s)", online_check.get('confidence'))
+        else:
+            online_check = detect_online_sales_capability(page)
         result['online_sales'] = online_check
         _apply_brand_site_overrides(result, is_official_brand, is_brand_site, online_check, page)
 

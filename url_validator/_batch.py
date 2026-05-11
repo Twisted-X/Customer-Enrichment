@@ -12,12 +12,12 @@ import logging
 import time
 from typing import Dict, List
 
-from playwright.sync_api import sync_playwright
-from playwright_stealth import Stealth
+from patchright.sync_api import sync_playwright
 
 from config import HEADLESS
+from browser_utils import pw_proxy
 
-from ._constants import _URL_COLUMN_CANDIDATES, _RATE_LIMIT_S, _BROWSER_UA
+from ._constants import _URL_COLUMN_CANDIDATES, _RATE_LIMIT_S
 from ._brand import normalize_url
 from ._check import check_url
 
@@ -102,9 +102,8 @@ def validate_urls(input_csv: str, output_csv: str) -> Dict:
         browser = p.chromium.launch(headless=HEADLESS)
         context = browser.new_context(
             viewport={'width': 1920, 'height': 1080},
-            user_agent=_BROWSER_UA,
+            proxy=pw_proxy(),
         )
-        Stealth().apply_stealth_sync(context)
 
         for i, url in enumerate(urls, 1):
             normalized = normalize_url(url)

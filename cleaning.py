@@ -10,7 +10,7 @@ All strategies return a flat list of compact product blocks.
 """
 import re
 from typing import Dict, List
-from playwright.sync_api import Page
+from patchright.sync_api import Page
 
 # ── Payload limits ──
 MAX_PRODUCTS = 300
@@ -204,24 +204,49 @@ def _segment_text_into_products(text: str, images: List[Dict]) -> List[Dict]:
 
         raw_segments.append(segment_text[:MAX_TEXT_PER_BLOCK])
 
-    # Assign images to segments (1:1 by position)
     products = []
     for i, seg_text in enumerate(raw_segments):
-        block_images = []
-        if i < len(images):
-            block_images = [images[i]]
-
+        block_images = _find_image_for_segment(seg_text, images, fallback_idx=i)
         products.append({
-            "text": seg_text,
+            "text":         seg_text,
             "html_snippet": "",
-            "images": block_images[:MAX_IMAGES_PER_BLOCK],
-            "links": [],
+            "images":       block_images[:MAX_IMAGES_PER_BLOCK],
+            "links":        [],
         })
-
         if len(products) >= MAX_PRODUCTS:
             break
 
     return products
+
+
+def _find_image_for_segment(
+    seg_text: str,
+    images: List[Dict],
+    fallback_idx: int,
+) -> List[Dict]:
+    """
+    Find the best-matching image for a product text segment.
+
+    Strategy:
+      1. Content match — look for an image whose alt text or src URL shares a
+         meaningful word (>4 chars) with the segment.  This handles carousels
+         and lazy-load wrappers that break the positional assumption.
+      2. Positional fallback — return images[fallback_idx] when no content
+         match is found (preserves the previous behaviour for simple pages).
+    """
+    if not images:
+        return []
+
+    seg_words = {w for w in seg_text.lower().split() if len(w) > 4}
+    for img in images:
+        alt = img.get("alt", "").lower()
+        src = img.get("src", "").lower()
+        if any(w in alt or w in src for w in seg_words):
+            return [img]
+
+    if fallback_idx < len(images):
+        return [images[fallback_idx]]
+    return []
 
 
 def _remove_dom_junk(page: Page) -> None:

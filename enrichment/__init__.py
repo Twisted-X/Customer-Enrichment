@@ -16,5 +16,6 @@ Pipeline flow (see _pipeline.py for full detail):
   8. Save CSV + JSON; upload to SFTP if configured
 """
 from ._pipeline import run_pipeline
+from ._enrich_single import enrich_single_customer
 
-__all__ = ["run_pipeline"]
+__all__ = ["run_pipeline", "enrich_single_customer"]

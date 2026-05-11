@@ -11,9 +11,29 @@ detect_twisted_x(page, url, ...)            -> dict
 detect_online_sales_capability(page)        -> dict
 """
 import logging
+import re as _re
 from typing import Dict
 
-from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
+from patchright.sync_api import Page, TimeoutError as PlaywrightTimeout
+
+from browser_utils import goto_safe as _goto_safe
+
+
+def _body_text(page: Page, timeout: int = 10_000) -> str:
+    """
+    Return visible body text as a lowercase string.
+
+    Caps inner_text at `timeout` ms and falls back to tag-stripped HTML so
+    WAF challenge pages (Imperva, Cloudflare) that keep the DOM in a loading
+    state never block a caller indefinitely.
+    """
+    try:
+        return page.inner_text('body', timeout=timeout).lower()
+    except Exception:
+        try:
+            return _re.sub(r'<[^>]+>', ' ', page.content()).lower()
+        except Exception:
+            return ''
 
 from ._constants import (
     _NO_RESULTS_PHRASES,
@@ -48,7 +68,7 @@ def detect_footwear(page: Page, base_url: str) -> Dict:
     footwear_paths = ['/boots', '/footwear', '/shoes', '/sandals', '/slippers', '/boot', '/shoe']
 
     try:
-        page_text = page.inner_text('body').lower()
+        page_text = _body_text(page)
         page_html = page.content().lower()
         current_url = page.url.lower()
 
@@ -69,9 +89,9 @@ def detect_footwear(page: Page, base_url: str) -> Dict:
         # Step 2: Category page check
         for path in ['/boots', '/footwear', '/shoes']:
             try:
-                page.goto(base_url.rstrip('/') + path, timeout=6000, wait_until='domcontentloaded')
-                page.wait_for_timeout(2000)
-                cat_text = page.inner_text('body').lower()
+                _goto_safe(page, base_url.rstrip('/') + path, timeout=8_000)
+                page.wait_for_timeout(1000)
+                cat_text = _body_text(page)
                 cat_html = page.content().lower()
                 if len(cat_text) < 300:
                     continue
@@ -89,7 +109,7 @@ def detect_footwear(page: Page, base_url: str) -> Dict:
         # Step 3: Search fallback
         if _search_on_site(page, 'boots'):
             page.wait_for_timeout(2000)
-            search_text = page.inner_text('body').lower()
+            search_text = _body_text(page)
             no_results = any(p in search_text for p in ['no results', 'no products found', '0 results', 'nothing found'])
             if not no_results and len(search_text) > 400:
                 result.update(sells_footwear=True, confidence='medium', method='search_boots')
@@ -132,7 +152,7 @@ def detect_twisted_x(page: Page, url: str, return_page_info: bool = False) -> Di
         return result
 
     try:
-        page_text = page.inner_text('body').lower()
+        page_text = _body_text(page)
         page_html = page.content().lower()
 
         if _check_brand_in_content(page_text, page_html):
@@ -149,7 +169,7 @@ def detect_twisted_x(page: Page, url: str, return_page_info: bool = False) -> Di
             if _search_on_site(page, search_term):
                 page.wait_for_timeout(3000)
                 new_url = page.url
-                page_after_search = page.inner_text('body').lower()
+                page_after_search = _body_text(page)
 
                 url_changed = (
                     new_url != original_url
@@ -167,7 +187,7 @@ def detect_twisted_x(page: Page, url: str, return_page_info: bool = False) -> Di
                     except Exception:
                         pass
 
-                    results_text = page.inner_text('body').lower()
+                    results_text = _body_text(page)
                     results_html = page.content().lower()
                     has_no_results = any(p in results_text for p in _NO_RESULTS_PHRASES)
 
@@ -191,8 +211,8 @@ def detect_twisted_x(page: Page, url: str, return_page_info: bool = False) -> Di
             # page load when the search never left the homepage.
             if page.url != original_url:
                 try:
-                    page.goto(url, timeout=8000, wait_until='domcontentloaded')
-                    page.wait_for_timeout(1000)
+                    _goto_safe(page, url, timeout=10_000)
+                    page.wait_for_timeout(500)
                 except Exception:
                     pass
 
@@ -229,7 +249,7 @@ def detect_online_sales_capability(page: Page) -> Dict:
     result = {'sells_online': False, 'confidence': 'low', 'indicators': [], 'blockers': []}
 
     try:
-        page_text = page.inner_text('body').lower()
+        page_text = _body_text(page)
         page_html = page.content().lower()
 
         # Check for visible, non-disabled purchase buttons

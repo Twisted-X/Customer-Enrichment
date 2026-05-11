@@ -38,6 +38,30 @@ PLACES_MAX_CANDIDATES = 20
 PLACES_REQUEST_TIMEOUT = 10
 
 # ---------------------------------------------------------------------------
+# Address Validation API + Places Details API (used by /api/enrich endpoint)
+# ---------------------------------------------------------------------------
+
+# POST endpoint — validates a physical address and returns a placeId when found.
+# Requires "Address Validation API" enabled in Google Cloud Console.
+ADDRESS_VALIDATION_URL = "https://addressvalidation.googleapis.com/v1:validateAddress"
+
+# GET endpoint — fetches full place details by placeId.
+# Requires "Places API (New)" (places.googleapis.com) enabled — distinct from
+# the legacy Places API.  Note: field mask has no "places." prefix (single
+# object, not a list).
+PLACES_DETAILS_URL = "https://places.googleapis.com/v1/places/{place_id}"
+PLACES_DETAILS_FIELD_MASK = (
+    "id,displayName,websiteUri,googleMapsUri,formattedAddress,"
+    "businessStatus,primaryType,primaryTypeDisplayName,nationalPhoneNumber,"
+    "rating,userRatingCount,regularOpeningHours,location"
+)
+
+# Per-request timeouts in seconds.  Both APIs are fast under normal conditions;
+# 8 s gives headroom for a single retry on 429/503 without blocking the caller.
+ADDRESS_VALIDATION_TIMEOUT = 8  # seconds
+PLACES_DETAILS_TIMEOUT = 8  # seconds
+
+# ---------------------------------------------------------------------------
 # SFTP
 # ---------------------------------------------------------------------------
 

@@ -1,8 +1,5 @@
 # Twisted X Scraper — Complete Architecture & Developer Guide
 
-> **Last verified against code: 2026-05-06**
-> Maintained by Yasasvi. Reviewer contact: Kaitlyn.
-
 ---
 
 ## Table of Contents
@@ -67,24 +64,40 @@ Results from both flows feed back into NetSuite via Celigo (a cloud iPaaS the IT
 +------------------------------------------------------------------+
 |              Scraper API  --  api_server.py  (FastAPI)            |
 |                                                                    |
-|   POST /api/check    ->  checker/  package                        |
-|   POST /api/scrape   ->  cleaning.py                              |
-|   POST /api/verify   ->  verifier.py                              |
+|   POST /api/check              ->  checker/  package              |
+|   POST /api/scrape             ->  cleaning.py                    |
+|   POST /api/verify             ->  verifier.py                    |
+|                                                                    |
+|   POST /api/enrich             ->  enrichment._enrich_single      |
+|   POST /api/enrich/batch       ->  enrichment._enrich_single (N)  |
+|   POST /api/enrich/pipeline    ->  enrichment.run_pipeline()      |
+|   POST /api/enrich/ttl-check   ->  enrichment._io.should_enrich   |
+|   POST /api/enrich/url-ping    ->  enrichment._url.bulk_check_urls|
+|   POST /api/enrich/online-status -> enrichment._product           |
+|   POST /api/enrich/address-validate -> enrichment._address_validation|
+|   POST /api/enrich/classify-retail -> enrichment._retail          |
 +-----------------------------+------------------------------------+
                               |
-                              v
-                   +--------------------+
-                   |  Playwright        |  headless Chromium
-                   |  (real browser)    |  opens retailer sites
-                   +--------------------+
+                  +-----------+-------------+
+                  |                         |
+                  v                         v
+       +--------------------+    +-------------------------+
+       |  Playwright        |    |  Google APIs            |
+       |  (real browser)    |    |  - Address Validation   |
+       |  headless Chromium |    |  - Places (New)         |
+       +--------------------+    |  - Places Text Search   |
+                                 +-------------------------+
 
 Separately, the enrichment pipeline runs as a standalone CLI:
 
 +------------------------------------------------------------------+
 |   url_enrichment_pipeline.py                                      |
 |   +-- enrichment/ package                                         |
+|         +-- _enrich_single.py  per-row: Address Validation →     |
+|         |                      location-biased search → fallback  |
+|         +-- _address_validation.py  Google Address Validation API |
 |         +-- _url.py       async URL pinging (aiohttp)             |
-|         +-- _places.py    Google Places API lookup                 |
+|         +-- _places.py    Google Places Text Search               |
 |         +-- _address.py   address normalisation + match           |
 |         +-- _company.py   company key dedup + branch logic         |
 |         +-- _retail.py    retail type classification               |
@@ -99,12 +112,14 @@ Separately, the enrichment pipeline runs as a standalone CLI:
 
 | Layer | File(s) | What it does |
 |-------|---------|-------------|
-| API server | `api_server.py` | FastAPI app — receives Celigo requests, routes to checker/cleaner/verifier |
-| Retailer detection | `checker/` | 3-layer check: HTTP -> sitemap -> Playwright browser |
+| API server | `api_server.py` | FastAPI app — retailer detection + scrape/verify + 8 enrichment endpoints |
+| Retailer detection | `checker/` | 3-layer check: HTTP → sitemap → Playwright browser |
 | DOM extraction | `cleaning.py` | Strips noise from rendered pages, returns product card blocks |
 | Anti-hallucination | `verifier.py` | Cross-checks LLM output against raw DOM blocks |
 | URL validation | `url_validator/` | Playwright deep-dive: sells TX? sells online? sells footwear? |
-| Enrichment pipeline | `enrichment/` | Bulk CSV enrichment: Places lookup, URL ping, status computation |
+| Single-record enrichment | `enrichment/_enrich_single.py` | Address Validation → location-biased Places search → Text Search fallback |
+| Enrichment API wrappers | `enrichment/_address_validation.py` | Google Address Validation API + location-biased Text Search wrappers |
+| Enrichment pipeline | `enrichment/` | Bulk CSV enrichment: per-row enrichment, URL ping, status computation |
 | Utilities | `suggest_urls_for_bad_rows.py`, `batch_check_excel.py`, `fill_phones.py` | One-off data repair scripts |
 
 ---
@@ -164,8 +179,13 @@ All logic lives in the `enrichment/` package. This file exists so operators can 
 
 ---
 
-#### `api_server.py` (~400 lines)
-FastAPI application entry point. Implements three endpoints:
+#### `api_server.py`
+FastAPI application entry point. Implements eleven endpoints across two groups.
+
+**Auth:** the eight `/api/enrich/*` endpoints require an `X-API-Key` header matching the
+`ENRICH_API_KEY` env var. The three retailer-detection endpoints need no auth.
+
+---
 
 **`POST /api/check`**
 Quick yes/no: does this retailer URL sell Twisted X products?
@@ -248,13 +268,186 @@ Uses `verifier.py`. Pure deterministic logic — no LLM calls here.
 
 ---
 
+**`POST /api/enrich`** _(requires `X-API-Key`)_
+Enrich a single NetSuite customer record.
+
+```
+Request: {
+  "company":     "Boot Barn",
+  "address":     "15776 N Greenway Hayden Loop",
+  "city":        "Scottsdale",
+  "state":       "AZ",
+  "zip_code":    "85260",
+  "current_url": "https://www.bootbarn.com",    // optional — informational only
+  "internal_id": "NS-12345"                      // optional — echoed back, never logged
+}
+
+Response: {
+  "found_url":                    "https://www.bootbarn.com",
+  "found_maps_url":               "https://maps.google.com/?cid=...",
+  "matched_name":                 "Boot Barn",
+  "places_place_id":              "ChIJ...",
+  "places_formatted_address":     "15776 N Greenway Hayden Loop, Scottsdale, AZ 85260",
+  "places_national_phone":        "(480) 951-2969",
+  "places_rating":                4.4,
+  "places_regular_opening_hours": "Monday: 9AM-9PM; ...",
+  "places_latitude":              33.6231,
+  "places_longitude":             -111.9086,
+  "places_business_status":       "OPERATIONAL",
+  "places_primary_type":          "clothing_store",
+  "match_confidence":             "high",
+  "enrichment_source":            "address_validation",
+  "address_match":                true
+}
+```
+
+**Lookup flow:** Google Address Validation API → location-biased Places Text Search (within 300m)
+→ plain Text Search fallback. `enrichment_source` values:
+- `address_validation` — primary path succeeded
+- `text_search` — primary failed/skipped; text search found a candidate
+- `not_found` — all paths completed, no candidate found
+- `enrichment_error` — technical error (timeout/5xx) AND no candidate found
+
+Google failures return HTTP **200** with `enrichment_source="enrichment_error"` — callers should
+retry on HTTP 5xx only, not on 200.
+
+---
+
+**`POST /api/enrich/batch`** _(requires `X-API-Key`)_
+Enrich up to 100 records in one call. Records are processed **concurrently** via a thread pool.
+
+```
+Request:  [ EnrichRequest, EnrichRequest, ... ]   // max 100 items
+Response: {
+  "results": [
+    { "internal_id": "NS-12345", "result": { ...EnrichResponse... } },
+    ...
+  ],
+  "total":        20,
+  "duration_sec": 3.42
+}
+```
+
+Results are returned in the **same order** as the request. Each item echoes `internal_id` so
+Celigo can match without relying on array position. Exceeding 100 items → HTTP 422.
+
+---
+
+**`POST /api/enrich/pipeline`** _(requires `X-API-Key`)_
+Trigger the full CSV batch pipeline (`url_enrichment_pipeline.py`). Long-running — set a
+generous HTTP timeout (use `READ_TIMEOUT` ≥ 1 hour for large files).
+
+```
+Request:  (no body)
+Response: {
+  "status":       "completed",
+  "message":      "Pipeline finished in 382.1s",
+  "started_at":   "2026-05-11T14:00:00+00:00",
+  "completed_at": "2026-05-11T14:06:22+00:00",
+  "duration_sec": 382.1
+}
+```
+
+Input/output controlled by `INPUT_FILE` / `OUTPUT_FILE` env vars (or SFTP when `USE_SFTP=true`).
+
+---
+
+**`POST /api/enrich/ttl-check`** _(requires `X-API-Key`)_
+Check which records are stale and need re-enrichment. Pure date logic — no Google API calls.
+
+```
+Request:  [
+  { "internal_id": "NS-1", "last_enrichment_date": "2026-04-01", "enrichment_source": "text_search" },
+  { "internal_id": "NS-2", "last_enrichment_date": null },
+  { "internal_id": "NS-3", "last_enrichment_date": "2026-05-10", "enrichment_source": "enrichment_error" }
+]
+Response: { "fresh": ["..."], "stale": ["NS-1", "NS-2", "NS-3"], "ttl_days": 30 }
+```
+
+A record is **stale** when: date is null/blank, older than `ENRICHMENT_TTL_DAYS`, or previous
+`enrichment_source` was `enrichment_error` / `address_mismatch` (always re-enriched regardless of age).
+
+---
+
+**`POST /api/enrich/url-ping`** _(requires `X-API-Key`)_
+Concurrently ping URLs and bucket them as alive / dead / missing.
+
+```
+Request:  [ { "internal_id": "NS-1", "url": "https://www.bootbarn.com" }, ... ]
+Response: {
+  "alive":   ["NS-1"],
+  "dead":    ["NS-2"],
+  "missing": ["NS-3"],
+  "details": [
+    { "internal_id": "NS-1", "status": "active",   "http_code": 200, "final_url": "https://..." },
+    { "internal_id": "NS-2", "status": "dead",     "http_code": 404, "final_url": null },
+    { "internal_id": "NS-3", "status": "missing",  "http_code": null, "final_url": null }
+  ]
+}
+```
+
+Status → bucket: `active`/`redirected`/`blocked` → **alive**; `dead` → **dead**; `missing` → **missing**.
+`blocked` (401/403/429/503) is grouped into alive — the server is reachable, URL is valid.
+
+---
+
+**`POST /api/enrich/address-validate`** _(requires `X-API-Key`)_
+Debug tool: call Google Address Validation API for a single address (one API call only, no Places lookup).
+
+```
+Request:  { "address": "15776 N Greenway Hayden Loop", "city": "Scottsdale", "state": "AZ", "zip_code": "85260" }
+Response: {
+  "geocoded":          true,
+  "latitude":          33.6231,
+  "longitude":         -111.9086,
+  "formatted_address": "15776 N Greenway Hayden Loop, Scottsdale, AZ 85260, USA",
+  "place_id_present":  true,
+  "is_business":       true,
+  "error":             null
+}
+```
+
+Diagnostic interpretation: `geocoded=false` → address too vague; `geocoded=true, place_id_present=false`
+→ coordinates found but no business listing; both `true` → enrichment should work.
+
+---
+
+**`POST /api/enrich/online-status`** _(requires `X-API-Key`)_
+Compute the NetSuite `online_sales_status` dropdown value from enrichment + product-check signals.
+Pure logic — no API calls.
+
+```
+Request:  { "found_url": "https://www.bootbarn.com", "sells_twisted_x": "yes", "sells_anything": "yes", "sells_shoes": "yes" }
+Response: { "online_sales_status": "Ecommerce Site : Sells Twisted X" }
+```
+
+Priority: no URL → `"No Website"` | TX=yes → `"Ecommerce Site : Sells Twisted X"` |
+anything+shoes=yes → `"Ecommerce Site : Opportunity"` | anything=yes,shoes=no →
+`"Ecommerce Site : Does Not Sell Twisted X"` | anything=no → `"No Ecommerce"` | blank → `""`.
+
+---
+
+**`POST /api/enrich/classify-retail`** _(requires `X-API-Key`)_
+Classify a business as `retail` / `not_retail` / `unknown`. Pure logic — no API calls.
+
+```
+Request:  { "primary_type": "shoe_store", "has_opening_hours": true, "is_channel_row": false }
+Response: { "retail_type": "retail" }
+```
+
+`is_channel_row=true` (ecom suffix in name) → `not_retail`. Warehouse/storage/distribution
+types → `not_retail`. Known store types (shoe_store, clothing_store, …) or has opening hours
+with unrecognised type → `retail`. Otherwise → `unknown`.
+
+---
+
 ### 4.2 API Layer
 
-#### `models.py` (86 lines)
-Pydantic request/response models for all three API endpoints. If Celigo or another caller
+#### `models.py`
+Pydantic request/response models for all API endpoints. If Celigo or another caller
 expects a field, it is defined here.
 
-Key models:
+Retailer detection models:
 - `CheckRequest` / `CheckResponse` — for `/api/check`
 - `ScrapeRequestNew` / `ScrapeResponse` / `ProductBlock` — for `/api/scrape`
   (`max_pages` defaults to **15**; `search_term` defaults to `"Twisted X"`)
@@ -262,6 +455,17 @@ Key models:
 
 **Important:** `ProductBlock` is both returned by `/api/scrape` and consumed as input by
 `/api/verify`. The structure must match exactly for the round-trip to work.
+
+Enrichment models:
+- `EnrichRequest` / `EnrichResponse` — for `/api/enrich` (single record); `EnrichRequest` is
+  also the element type for `/api/enrich/batch`
+- `EnrichPipelineResponse` — for `/api/enrich/pipeline` (status, timestamps, duration)
+- `TtlCheckItem` / `TtlCheckResponse` — for `/api/enrich/ttl-check`
+- `UrlPingItem` / `UrlPingDetail` / `UrlPingResponse` — for `/api/enrich/url-ping`
+- `BatchEnrichItem` / `BatchEnrichResponse` — for `/api/enrich/batch`
+- `OnlineStatusRequest` / `OnlineStatusResponse` — for `/api/enrich/online-status`
+- `AddressValidateRequest` / `AddressValidateResponse` — for `/api/enrich/address-validate`
+- `ClassifyRetailRequest` / `ClassifyRetailResponse` — for `/api/enrich/classify-retail`
 
 ---
 
@@ -459,7 +663,9 @@ Steps:
 
 Bulk CSV enrichment pipeline. Called by `url_enrichment_pipeline.py`.
 
-**Entry point:** `from enrichment import run_pipeline; run_pipeline()`
+**Entry points:**
+- `from enrichment import run_pipeline; run_pipeline()` — full CSV batch pipeline
+- `from enrichment import enrich_single_customer; enrich_single_customer(...)` — single record
 
 #### Pipeline steps (in order)
 
@@ -473,18 +679,21 @@ Bulk CSV enrichment pipeline. Called by `url_enrichment_pipeline.py`.
    strip invisible chars, validate required columns
 
 3. Partition rows
-   Skip rows enriched within ENRICHMENT_TTL_DAYS (default 90)
-   Re-enrich rows with blank date or enrichment_error status
+   Skip rows enriched within ENRICHMENT_TTL_DAYS (default 30)
+   Re-enrich rows with blank date, enrichment_error, or address_mismatch status
 
 4. URL ping
    Async aiohttp HEAD requests, 50 concurrent
    Classifies each URL: active / redirected / dead / blocked / not_found
 
-5. Google Places loop (per unique company, not per row)
-   build_branch_norms() -> groups branches of same company
-   find_on_google_places() -> top candidate
-   address_matches() -> confirm correct location
-   Writes: business name, phone, address, lat/lng, place_id, hours
+5. Per-row enrichment loop (_run_enrich_loop)
+   For each stale row: enrich_single_customer(company, address, city, state, zip)
+     -> Step A: Google Address Validation API -> lat/lng
+     -> Step B: location-biased Text Search (within 300m of coordinates)
+     -> Step C: plain Text Search fallback (if A/B failed or PO box)
+     -> Step D: address_match_confidence on winning candidate
+   Writes: business name, phone, address, lat/lng, place_id, hours,
+           enrichment_source, match_confidence, address_match
 
 6. Product check (if ENABLE_PRODUCT_CHECK=true)
    domain_signals() -> fast path for 34 known domains
@@ -503,7 +712,43 @@ Bulk CSV enrichment pipeline. Called by `url_enrichment_pipeline.py`.
 #### Module-by-module reference
 
 **`enrichment/__init__.py`**
-Exposes only `run_pipeline`. Everything else is package-internal.
+Exposes `run_pipeline` and `enrich_single_customer`. Everything else is package-internal.
+
+---
+
+**`enrichment/_enrich_single.py`** _(new)_
+Single-record enrichment orchestration. Public entry point: `enrich_single_customer()`.
+
+Lookup flow:
+1. **Input normalisation** — strip suite/apt noise, uppercase state, strip ZIP+4, detect PO boxes
+2. **Address Validation API** — resolves physical address to lat/lng; PO boxes skip this step
+3. **Location-biased Text Search** — searches for company by name within 300m of the geocoded point;
+   finds the specific branch at that address rather than any branch of the chain in a different city
+4. **Text Search fallback** — `find_places_candidates()` + `pick_branch_candidate_for_row()` if primary path failed
+5. **`address_match_confidence()`** — grades the winning candidate: `high` / `medium` / `low` / `none`
+
+`enrichment_source` values: `address_validation` | `text_search` | `not_found` | `enrichment_error`.
+Never raises — all errors are captured and reflected in `enrichment_source`.
+PII-safe logging: logs city/state/enrichment_source/latency/error; never logs company, street, or internal_id.
+
+---
+
+**`enrichment/_address_validation.py`** _(new)_
+HTTP wrappers for two Google APIs used by `_enrich_single`.
+
+`validate_address(address, city, state, zip_code) -> (dict | None, error_code)`
+- POST to Google Address Validation API
+- Returns `{"place_id", "formatted_address", "is_business", "latitude", "longitude"}` on success
+- `is_business` is logged only — never used to choose a lookup path
+- Returns `(None, error_code)` on failure: `timeout` | `quota` | `upstream_5xx` | `parse_error`
+
+`find_places_near_location(company, lat, lng, radius_meters=300) -> (list | None, error_code)`
+- Location-biased Text Search POST to `PLACES_URL`
+- Same `FIELD_MASK` and result shape as the existing text search
+- Returns `(candidates_list, "")` on success — list may be empty if no match within radius
+- Returns `(None, error_code)` on failure
+
+Both functions retry once on 429/503. All exceptions are swallowed; callers never need `try/except`.
 
 ---
 
@@ -535,7 +780,10 @@ Internal step functions (not public API):
 - `_partition_by_freshness(df)` — calls `should_enrich()` per row, returns index sets
 - `_tag_fresh_rows(df, fresh_idx)` — copies existing enrichment data to fresh rows
 - `_run_url_ping(df, enrich_idx)` — returns `(ping_df, already_alive_idx, broken_idx)`
-- `_run_places_loop(df, ...)` — per-company Places lookup loop
+- `_run_enrich_loop(df, ...)` — **new** per-row loop; calls `enrich_single_customer()` for each row;
+  supersedes the old per-company `_run_places_loop()` (kept as legacy, no longer called)
+- `_maybe_backfill_url_new(df, idx, result)` — backfills `found_url` from enrichment result
+  when `enrichment_source` is `address_validation` or `text_search`
 - `_run_product_check(df)` — calls `/api/check` per live URL
 - `_log_summary(df, output_path)` — prints final stats
 
@@ -938,11 +1186,14 @@ Trigger: python3 url_enrichment_pipeline.py
   +- URL ping: async HEAD -> alive/dead/redirected/blocked
   |   (50 concurrent, ~30 seconds for 1,000 URLs)
   |
-  +- Google Places loop (per unique company, not per row):
-  |   build_branch_norms() -> groups branches of same company
-  |   find_on_google_places() -> top candidate
-  |   address_matches() -> confirm correct location
-  |   Writes: business name, phone, address, lat/lng, place_id, hours
+  +- Per-row enrichment loop (_run_enrich_loop):
+  |   For each stale row: enrich_single_customer(company, address, city, state, zip)
+  |     -> Google Address Validation API -> lat/lng
+  |     -> location-biased Text Search (within 300m)
+  |     -> plain Text Search fallback
+  |     -> address_match_confidence on winner
+  |   Writes: business name, phone, address, lat/lng, place_id, hours,
+  |           enrichment_source, match_confidence, address_match
   |
   +- Product check (if ENABLE_PRODUCT_CHECK=true):
   |   domain_signals() -> fast path for 34 known domains
@@ -987,7 +1238,8 @@ All configuration via environment variables. Copy `.env.example` -> `.env` and f
 
 | Variable | Required for | Default | Description |
 |----------|-------------|---------|-------------|
-| `GOOGLE_PLACES_API_KEY` | Enrichment pipeline | — | Google Places Text Search API key |
+| `GOOGLE_PLACES_API_KEY` | Enrichment pipeline + all `/api/enrich/*` | — | Google Places + Address Validation API key |
+| `ENRICH_API_KEY` | All `/api/enrich/*` endpoints | — | Shared secret; pass as `X-API-Key` header. Server refuses to start if unset. |
 | `GOOGLE_CSE_API_KEY` | URL recovery | — | Google Custom Search Engine API key |
 | `GOOGLE_CSE_CX` | URL recovery | — | Custom Search Engine ID |
 | `USE_SFTP` | Enrichment pipeline | `false` | `true` = SFTP mode (Celigo automated flow) |
@@ -1002,7 +1254,7 @@ All configuration via environment variables. Copy `.env.example` -> `.env` and f
 | `SFTP_REVIEW_DIR` | SFTP mode | `/review` | Dir to upload enriched output |
 | `SFTP_ARCHIVE_DIR` | SFTP mode | `/archive` | Dir to move processed input |
 | `ENABLE_PRODUCT_CHECK` | Enrichment pipeline | `false` | Call `/api/check` per URL |
-| `ENRICHMENT_TTL_DAYS` | Enrichment pipeline | `90` | Skip re-enrichment within this many days |
+| `ENRICHMENT_TTL_DAYS` | Enrichment pipeline + `/api/enrich/ttl-check` | `30` | Skip re-enrichment within this many days |
 | `SKU_XLSX_FILENAME` | API server | `twisted_x_skus_v107.xlsx` | Override SKU database filename |
 | `SKU_CSV_FILENAME` | API server | `twisted_x_sku.csv` | Override fallback SKU CSV |
 | `MIN_EXPECTED_STYLE_CODES` | API server | `1000` | Server refuses to start if fewer codes loaded |
@@ -1067,7 +1319,8 @@ per company.
 | Env vars | python-dotenv | 1.0+ | `.env` file loading |
 | Integration | Celigo (cloud) | — | Orchestration, LLM calls, NetSuite sync |
 | LLM | Anthropic Claude | — | Product extraction (called by Celigo, not this service) |
-| Places lookup | Google Places API | — | Retailer address/phone/URL enrichment |
+| Places lookup | Google Places API (New) | — | Retailer address/phone/URL enrichment via Text Search |
+| Address lookup | Google Address Validation API | — | Geocode physical address → lat/lng → location-biased Places search |
 | URL search | Google Custom Search Engine | — | Fallback URL discovery |
 
 ---
@@ -1083,6 +1336,29 @@ per company.
 | `suggest_urls_for_bad_rows.py` is 870 lines | Hard to maintain | Low priority — runs rarely |
 | Sync Playwright (blocking) | One scrape blocks the API worker | Acceptable at current volume |
 | Product classification (gender/type) not in Python API | Classification runs in Celigo after `/api/verify` | Deliberate — see design decision above |
+
+### Completed Refactors (2026-05-11) — Enrichment API
+
+- **`enrichment/_enrich_single.py`** (new): `enrich_single_customer()` orchestrates the new
+  Address Validation → location-biased Text Search → fallback flow per record.
+  - PO box detection skips directly to text search fallback.
+  - `is_business` flag from Address Validation is logged only — never used for routing.
+  - Never raises — all Google API failures reflected in `enrichment_source`.
+  - PII-safe: company name, street address, and `internal_id` never logged.
+- **`enrichment/_address_validation.py`** (new): `validate_address()` and
+  `find_places_near_location()` wrappers with retry, error classification, and full error
+  propagation via `(result, error_code)` tuple return convention.
+- **`enrichment/_pipeline.py`**: `_run_places_loop()` (per-company) replaced by
+  `_run_enrich_loop()` (per-row) which calls `enrich_single_customer()` per stale row.
+  Old loop kept as `_run_places_loop_legacy()` for reference.
+- **`enrichment/__init__.py`**: exports `enrich_single_customer` in addition to `run_pipeline`.
+- **`api_server.py`**: 8 new endpoints under `/api/enrich/*`:
+  `POST /api/enrich`, `/api/enrich/batch`, `/api/enrich/pipeline`,
+  `/api/enrich/ttl-check`, `/api/enrich/url-ping`, `/api/enrich/online-status`,
+  `/api/enrich/address-validate`, `/api/enrich/classify-retail`.
+  All protected by `ENRICH_API_KEY` via `X-API-Key` header (HMAC constant-time compare).
+  Server refuses to start if `ENRICH_API_KEY` is unset.
+- **`models.py`**: 14 new Pydantic models for all 8 enrichment endpoints.
 
 ### Completed Refactors (2026-05-05 → 2026-05-06)
 

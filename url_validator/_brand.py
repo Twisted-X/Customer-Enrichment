@@ -12,7 +12,7 @@ _classify_brand_site(final_url, text, url) -> (bool, bool)
 from typing import Optional
 from urllib.parse import urlparse
 
-from playwright.sync_api import Page
+from patchright.sync_api import Page
 from brand_config import ALL_INDICATORS as _BRAND_INDICATORS
 
 from ._constants import _GENERIC_BRAND_WORDS, _PRODUCT_TITLE_SELECTORS
@@ -69,10 +69,6 @@ def _check_brand_in_content(text: str, html: str = '') -> bool:
         if ind not in _GENERIC_BRAND_WORDS
     )
     if specific_hit:
-        return True
-
-    generic_hit = any(ind in content for ind in _GENERIC_BRAND_WORDS)
-    if generic_hit and specific_hit:
         return True
 
     return False

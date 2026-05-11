@@ -9,9 +9,23 @@ _search_on_site(page, term)              -> bool
 _try_category_pages(page, base_url)      -> bool
 """
 import logging
+import re as _re
 from urllib.parse import urlparse
 
-from playwright.sync_api import Page
+from patchright.sync_api import Page
+
+from browser_utils import goto_safe as _goto_safe
+
+
+def _body_text(page: Page, timeout: int = 10_000) -> str:
+    """Return visible body text, capped at timeout ms, falling back to stripped HTML."""
+    try:
+        return page.inner_text('body', timeout=timeout).lower()
+    except Exception:
+        try:
+            return _re.sub(r'<[^>]+>', ' ', page.content()).lower()
+        except Exception:
+            return ''
 
 from ._constants import _POPUP_CLOSE_SELECTORS, _SEARCH_INPUT_SELECTORS, _SEARCH_ICON_SELECTORS
 from ._brand import _check_brand_in_content, _is_netsuite_site
@@ -119,8 +133,8 @@ def _search_on_site(page: Page, search_term: str) -> bool:
 
         for search_url in search_urls:
             try:
-                page.goto(search_url, timeout=15000, wait_until='domcontentloaded')
-                page.wait_for_timeout(2000)
+                _goto_safe(page, search_url, timeout=15_000)
+                page.wait_for_timeout(1000)
                 landed = page.url.lower()
                 looks_like_search = (
                     '?s=' in landed or 'search' in landed
@@ -128,7 +142,7 @@ def _search_on_site(page: Page, search_term: str) -> bool:
                 )
                 if looks_like_search:
                     try:
-                        body_len = len(page.inner_text('body'))
+                        body_len = len(_body_text(page))
                     except Exception:
                         body_len = 0
                     if body_len > 300:
@@ -148,9 +162,9 @@ def _try_category_pages(page: Page, base_url: str) -> bool:
     """
     for path in ['/boots', '/footwear', '/shoes']:
         try:
-            page.goto(base_url.rstrip('/') + path, timeout=6000, wait_until='domcontentloaded')
-            page.wait_for_timeout(2000)
-            if _check_brand_in_content(page.inner_text('body').lower(), page.content().lower()):
+            _goto_safe(page, base_url.rstrip('/') + path, timeout=8_000)
+            page.wait_for_timeout(1000)
+            if _check_brand_in_content(_body_text(page), page.content().lower()):
                 return True
         except Exception:
             continue

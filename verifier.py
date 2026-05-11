@@ -172,14 +172,35 @@ def verify_product_against_block(extracted_product: Dict, original_block: Dict) 
     critical_issues = [i for i in issues if "name" in i.lower() or "brand" in i.lower()]
     verified = len(critical_issues) == 0
 
+    # Build evidence snippets so calculate_confidence can award name/price points.
+    # Snippets are short excerpts from the source block that confirm the field.
+    name_snippet  = ""
+    price_snippet = ""
+
+    if name:
+        name_key = name.lower()[:30]
+        if name_key in original_text:
+            idx = original_text.index(name_key)
+            name_snippet = original_text[max(0, idx - 10): idx + 70].strip()
+
+    if price:
+        price_digits = re.sub(r'[^0-9.]', '', str(price))
+        if price_digits and price_digits in original_text:
+            idx = original_text.index(price_digits)
+            price_snippet = original_text[max(0, idx - 5): idx + 25].strip()
+
     result_product = extracted_product.copy()
     result_product["verification_status"] = "verified" if verified else "flagged"
     result_product["verification_issues"] = issues
+    result_product["evidence"] = {
+        "name_snippet":  name_snippet,
+        "price_snippet": price_snippet,
+    }
 
     return {
         "verified": verified,
-        "issues": issues,
-        "product": result_product
+        "issues":   issues,
+        "product":  result_product,
     }
 
 
@@ -203,25 +224,24 @@ def verify_products_against_blocks(extracted_products: List[Dict], original_prod
     flagged_products = []
 
     for i, extracted in enumerate(extracted_products):
-        matching_block = None
+        # Use name-based fuzzy matching as the primary strategy for all products.
+        # Index alignment is used only as a small tiebreaker so that when two
+        # blocks have equal similarity scores the positionally correct one wins.
+        # This handles LLM output that reorders or deduplicates products.
+        extracted_name = extracted.get("name", "").lower()
+        best_match     = None
+        best_score     = 0.0
 
-        if i < len(original_products):
-            matching_block = original_products[i]
-        else:
-            # Try fuzzy matching by name
-            extracted_name = extracted.get("name", "").lower()
-            best_match = None
-            best_similarity = 0
-            for block in original_products:
-                block_text = block.get("text", "").lower()
-                if extracted_name:
-                    similarity = SequenceMatcher(None, extracted_name[:50], block_text[:200]).ratio()
-                    if similarity > best_similarity:
-                        best_similarity = similarity
-                        best_match = block
+        for j, block in enumerate(original_products):
+            block_text = block.get("text", "").lower()
+            score = SequenceMatcher(None, extracted_name[:50], block_text[:200]).ratio()
+            if j == i:
+                score += 0.01   # slight boost for index alignment as tiebreaker
+            if score > best_score:
+                best_score = score
+                best_match = block
 
-            if best_similarity > 0.3:
-                matching_block = best_match
+        matching_block = best_match if best_score > 0.25 else None
 
         if matching_block:
             result = verify_product_against_block(extracted, matching_block)

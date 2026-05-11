@@ -23,8 +23,9 @@ from typing import List, Optional
 from urllib.parse import urlparse as _urlparse
 
 from config import HEADLESS, TX_STYLE_CODES
-from ._types import SearchOutcome, ScanResult, empty_scan, empty_search
-from ._platform import detect_platform, detect_blocked
+from browser_utils import pw_proxy
+from ._types import SearchOutcome, ScanResult, empty_scan
+from ._platform import detect_platform, detect_blocked, _goto_safe
 from ._search import search_netsuite, search_shopify_or_woo, search_generic
 from ._scanners import scan_page_for_skus, find_brand_in_product_context
 
@@ -53,8 +54,7 @@ def playwright_check(url: str, normalized: str, retailer_name: str) -> dict:
     Returns a dict matching the CheckResponse Pydantic model shape.
     Never raises — catches all browser errors and returns a result with error set.
     """
-    from playwright.sync_api import sync_playwright
-    from playwright_stealth import Stealth
+    from patchright.sync_api import sync_playwright
     from url_validator import check_url as validate_url
 
     result = _empty_result(normalized, retailer_name)
@@ -66,15 +66,15 @@ def playwright_check(url: str, normalized: str, retailer_name: str) -> dict:
             context = browser.new_context(
                 viewport={"width": 1920, "height": 1080},
                 user_agent=_DESKTOP_UA,
+                proxy=pw_proxy(),
             )
-            Stealth().apply_stealth_sync(context)
             page = context.new_page()
 
             try:
                 log.info("Playwright check: %s (%s)", retailer_name, normalized)
 
                 # ── Step 1: Load homepage, detect platform and bot-blocking ──
-                page.goto(normalized, timeout=15_000, wait_until='domcontentloaded')
+                _goto_safe(page, normalized, timeout=15_000)
                 page.wait_for_timeout(2_000)
 
                 is_blocked, blocked_reasons = detect_blocked(page)
@@ -84,10 +84,15 @@ def playwright_check(url: str, normalized: str, retailer_name: str) -> dict:
                 # ── Step 2: Platform-aware search ──
                 search_outcome = _run_search(page, platform, base_url, normalized)
 
-                # ── Step 3: Full validation (online sales, footwear, store type) ──
-                page.goto(normalized, timeout=15_000, wait_until='domcontentloaded')
+                # ── Step 3: Validation for online sales + footwear only ──
+                # skip_tx_check=True: the checker's own SKU scan (_run_search /
+                # _dual_page_scan) is the authoritative TX signal.  Running
+                # detect_twisted_x inside validate_url would be a duplicate pass
+                # that wastes 15-30 s and navigates the browser away from the
+                # search results page we just landed on.
+                _goto_safe(page, normalized, timeout=15_000)
                 page.wait_for_timeout(2_000)
-                validation = validate_url(normalized, page)
+                validation = validate_url(normalized, page, skip_tx_check=True)
 
                 # ── Step 4: Dual-page SKU check (product page + homepage) ──
                 dual_scan, dual_brand_found, dual_brand_samples = _dual_page_scan(
@@ -172,7 +177,7 @@ def _dual_page_scan(page, platform, base_url, normalized, search_outcome: Search
     # Fall back to homepage scan
     log.info("No match on product page, scanning homepage")
     try:
-        page.goto(normalized, timeout=15_000, wait_until='domcontentloaded')
+        _goto_safe(page, normalized, timeout=15_000)
         page.wait_for_timeout(3_000)
         sku_scan = scan_page_for_skus(page)
         if sku_scan["matched_codes"]:
@@ -196,7 +201,7 @@ def _goto_product_page(page, platform: str, base_url: str, normalized: str) -> N
     target = urls.get(platform)
     if target:
         try:
-            page.goto(target, timeout=15_000, wait_until='domcontentloaded')
+            _goto_safe(page, target, timeout=15_000)
             page.wait_for_timeout(3_500)
             return
         except Exception as exc:
@@ -205,7 +210,7 @@ def _goto_product_page(page, platform: str, base_url: str, normalized: str) -> N
     # Generic: use Playwright search-bar interaction
     import url_validator
     try:
-        page.goto(normalized, timeout=15_000, wait_until='domcontentloaded')
+        _goto_safe(page, normalized, timeout=15_000)
         page.wait_for_timeout(1_500)
         url_validator._search_on_site(page, 'Twisted X')
         page.wait_for_timeout(4_000)
@@ -231,11 +236,13 @@ def _assemble_result(
 ) -> dict:
     result = _empty_result(url, retailer_name)
 
-    # Populate from validation
-    result["sells_twisted_x"] = validation.get("has_twisted_x", False)
-    result["sells_online"]    = validation.get("sells_online", False)
-    result["sells_footwear"]  = validation.get("sells_footwear")
-    result["store_type"]      = _determine_store_type(validation, page.url)
+    # Populate online/footwear/store fields from validation.
+    # sells_twisted_x is NOT taken from validation here — the checker's own
+    # SKU scan (_run_search / _dual_page_scan) is the authoritative TX signal
+    # and will be set below by _apply_sku_match / _apply_brand_match / _apply_no_match.
+    result["sells_online"]   = validation.get("sells_online", False)
+    result["sells_footwear"] = validation.get("sells_footwear")
+    result["store_type"]     = _determine_store_type(validation, page.url)
 
     sku_matched = bool(dual_scan["matched_codes"])
     proof: List[str] = []
@@ -247,7 +254,7 @@ def _assemble_result(
     elif search_outcome["brand_found"] and search_outcome["brand_samples"]:
         result, proof = _apply_brand_match(result, search_outcome["brand_samples"], proof, page)
     else:
-        result, proof = _apply_no_match(result, validation, proof, page)
+        result, proof = _apply_no_match(result, validation, proof)
 
     # Online sales evidence (ecommerce signals, offline blockers)
     online_info = validation.get("online_sales", {})
@@ -323,7 +330,7 @@ def _apply_brand_match(result: dict, samples: list, proof: List[str], page) -> t
     return result, proof
 
 
-def _apply_no_match(result: dict, validation: dict, proof: List[str], page) -> tuple:
+def _apply_no_match(result: dict, validation: dict, proof: List[str]) -> tuple:
     result["sells_twisted_x"] = False
     result["confidence"]       = "high"
     proof += [

@@ -19,6 +19,7 @@ from urllib.parse import urlparse as _urlparse
 
 from ._types import SearchOutcome, empty_search
 from ._scanners import scan_page_for_skus, find_brand_in_product_context
+from ._platform import _goto_safe
 
 log = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ def search_netsuite(page, base_url: str) -> SearchOutcome:
     log.info("NetSuite catalog URL: %s", search_url)
 
     try:
-        page.goto(search_url, timeout=20_000, wait_until='domcontentloaded')
+        _goto_safe(page, search_url, timeout=20_000)
         page.wait_for_timeout(3_500)
         _scroll_to_load(page)
     except Exception as exc:
@@ -148,7 +149,7 @@ def _try_url(page, url: str, label: str) -> SearchOutcome:
     """Navigate to `url`, wait for content, scan. Returns empty_search() on failure."""
     log.info("%s: trying %s", label, url)
     try:
-        page.goto(url, timeout=20_000, wait_until='domcontentloaded')
+        _goto_safe(page, url, timeout=20_000)
         # Smart wait: poll until content renders (max ~8s)
         for _ in range(4):
             page.wait_for_timeout(2_000)
@@ -173,7 +174,7 @@ def _search_via_ui(page, normalized_url: str) -> SearchOutcome:
 
     for term in ['Twisted X', 'TwistedX']:
         try:
-            page.goto(normalized_url, timeout=15_000, wait_until='domcontentloaded')
+            _goto_safe(page, normalized_url, timeout=15_000)
             page.wait_for_timeout(1_000)
 
             if not url_validator._search_on_site(page, term):

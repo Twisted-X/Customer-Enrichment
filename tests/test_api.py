@@ -4,8 +4,6 @@ FastAPI endpoint tests — uses TestClient (no real network/browser calls).
 Playwright-dependent endpoints (/api/check, /api/scrape) are tested with
 _check_url_sync and _scrape_url_sync mocked to avoid browser startup.
 """
-import sys
-import types
 import unittest.mock
 import pytest
 

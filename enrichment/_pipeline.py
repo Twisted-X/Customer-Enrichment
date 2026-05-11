@@ -21,19 +21,15 @@ from tqdm import tqdm
 
 from ._config import (
     USE_SFTP, INPUT_FILE, OUTPUT_FILE,
-    COMPANY_COL, URL_COL, ADDRESS_COLS,
+    COMPANY_COL, URL_COL, ADDRESS_COLS, NETSUITE_ID_COL,
     NETSUITE_LAST_ENRICHED_COL, ENRICHMENT_TTL_DAYS,
     PING_EXISTING_URLS, FILL_BLANK_WEBSITE_WHEN_MATCHED,
-    ACCEPT_UNVERIFIED_MATCH, ENABLE_PRODUCT_CHECK, CHECK_WORKERS,
-    PLACES_MAX_CANDIDATES, WEBSITE_NOT_FOUND_LABEL,
+    ENABLE_PRODUCT_CHECK, CHECK_WORKERS,
+    WEBSITE_NOT_FOUND_LABEL,
 )
 from ._url import is_url_blank_or_invalid, bulk_check_urls, classify_url, extract_root_domain
-from ._places import find_places_candidates
-from ._company import (
-    normalize_company_key, is_channel_row,
-    pick_branch_candidate_for_row, pick_places_result_for_company,
-    build_branch_norms,
-)
+from ._enrich_single import enrich_single_customer
+from ._company import is_channel_row
 from ._retail import classify_retail_type
 from ._product import check_product_signals, compute_online_sales_status
 from ._io import (
@@ -72,7 +68,7 @@ def run_pipeline() -> None:
       2. Load + normalise DataFrame
       3. Mark rows as fresh (skip) or stale (enrich)
       4. Ping URLs for health check
-      5. Google Places lookup (company-level deduplication)
+      5. Per-row enrichment (Address Validation → location-biased Text Search → fallback)
       6. Optional product check via /api/check
       7. Compute NetSuite online_sales_status
       8. Save CSV + JSON, upload to SFTP
@@ -92,8 +88,7 @@ def run_pipeline() -> None:
     _log_ping_summary(df, enrich_idx, already_alive_idx, broken_idx)
     _write_alive_rows(df, ping_df, already_alive_idx, enrich_idx, today_iso)
 
-    branch_norms = build_branch_norms(df)
-    _run_places_loop(df, ping_df, broken_idx, already_alive_idx, branch_norms, today_iso)
+    _run_enrich_loop(df, ping_df, broken_idx, already_alive_idx, today_iso)
 
     if ENABLE_PRODUCT_CHECK:
         _run_product_check(df)
@@ -251,201 +246,132 @@ def _write_alive_rows(df, ping_df, already_alive_idx, enrich_idx, today_iso) -> 
 
 
 # ---------------------------------------------------------------------------
-# Step 5 — Google Places loop
+# Step 5 — Enrichment loop (new flow: Address Validation → location-biased search)
 # ---------------------------------------------------------------------------
 
-def _run_places_loop(
+def _run_enrich_loop(
     df: pd.DataFrame,
     ping_df: pd.DataFrame,
     broken_idx: list,
     already_alive_idx: list,
-    branch_norms: dict,
     today_iso: str,
 ) -> None:
     """
-    For each unique company, call Google Places once, then write results to
-    every row belonging to that company.
+    Per-row enrichment using enrich_single_customer() (Address Validation →
+    location-biased Text Search → Text Search fallback).
+
+    Replaces _run_places_loop() — processes each row individually rather than
+    grouping by company key.  More accurate for large chains (finds the exact
+    branch at the given address) and for small/obscure shops (uses street
+    address as primary key, not company name).
     """
     already_alive_set = set(already_alive_idx)
+    all_indices = broken_idx + already_alive_idx
 
-    # Group rows by company key (one Places call per company)
-    company_to_indices: dict = {}
-    for idx in broken_idx + already_alive_idx:
-        if idx not in df.index:
-            continue
-        r  = df.loc[idx]
-        ck = normalize_company_key(r, COMPANY_COL)
-        if not ck:
-            _write_no_company_row(df, ping_df, idx)
-            continue
-        company_to_indices.setdefault(ck, []).append(idx)
-
-    unique_companies = list(company_to_indices.keys())
-    log.info("Companies needing Places lookup: %d", len(unique_companies))
+    log.info("Rows to enrich via enrich_single_customer: %d", len(all_indices))
 
     def _coerce(val):
         return val if val is not None else ""
 
-    for ck in tqdm(unique_companies, desc="  Google Places lookup"):
-        indices         = company_to_indices[ck]
-        first_idx       = indices[0]
-        company_display = df.loc[first_idx].get(COMPANY_COL, "")
-        co_branch_norms = branch_norms.get(ck, [])
+    for idx in tqdm(all_indices, desc="  Enriching rows"):
+        if idx not in df.index:
+            continue
 
-        hint_city, hint_state = _pick_location_hint(df, indices)
+        row         = df.loc[idx]
+        company     = str(row.get(COMPANY_COL, "")   or "").strip()
+        address     = str(row.get("address", "")     or "").strip()
+        city        = str(row.get("city", "")        or "").strip()
+        state       = str(row.get("state", "")       or "").strip()
+        zip_code    = str(row.get("zip code", "")    or "").strip()
+        current_url = str(row.get(URL_COL, "")       or "")
+        internal_id = str(row.get(NETSUITE_ID_COL, "") or "")
 
-        candidates = find_places_candidates(
-            company_display, hint_city, hint_state, "",
-            max_result_count=PLACES_MAX_CANDIDATES,
+        if not company:
+            _write_no_company_row(df, ping_df, idx)
+            continue
+
+        # ── Call the enrichment function ───────────────────────────────────
+        result = enrich_single_customer(
+            company=company,
+            address=address,
+            city=city,
+            state=state,
+            zip_code=zip_code,
+            current_url=current_url or None,
+            internal_id=internal_id or None,
         )
 
-        # Global fallback: if location hint caused Google to return a result
-        # with no website, search again without the hint to find the main site.
-        local_website = _best_website(candidates) if candidates else ""
-        if not local_website and (hint_city or hint_state):
-            global_cands  = find_places_candidates(
-                company_display, "", "", "",
-                max_result_count=PLACES_MAX_CANDIDATES,
-            )
-            global_website = _best_website(global_cands) if global_cands else ""
+        # ── URL check columns (preserve URL for rows whose URL is alive) ───
+        ping_row  = ping_df.loc[idx] if idx in ping_df.index else {}
+        http_code = ping_row.get("_http_code")
+        df.at[idx, "url_check_status"] = ping_row.get("_url_status", "missing")
+        df.at[idx, "url_http_code"]    = str(http_code) if http_code is not None else ""
+
+        is_alive = idx in already_alive_set
+        if not is_alive:
+            found_url = result.get("found_url") or WEBSITE_NOT_FOUND_LABEL
+            df.at[idx, "found_url"]         = found_url
+            df.at[idx, "found_url_type"]    = classify_url(found_url)
+            df.at[idx, "found_root_domain"] = extract_root_domain(found_url)
+
+        # ── Enrichment metadata ────────────────────────────────────────────
+        enrichment_src = result.get("enrichment_source", "")
+        df.at[idx, "enrichment_source"]   = enrichment_src
+        df.at[idx, "address_match"]       = result.get("address_match", False)
+        df.at[idx, "match_confidence"]    = result.get("match_confidence", "none")
+        df.at[idx, "enrichment_run_date"] = today_iso
+
+        # ── Places branch data ─────────────────────────────────────────────
+        if result.get("places_place_id"):
+            df.at[idx, "places_formatted_address"]         = _coerce(result.get("places_formatted_address"))
+            df.at[idx, "places_national_phone"]            = _coerce(result.get("places_national_phone"))
+            df.at[idx, "found_maps_url"]                   = _coerce(result.get("found_maps_url"))
+            df.at[idx, "places_regular_opening_hours"]     = _coerce(result.get("places_regular_opening_hours"))
+            df.at[idx, "places_rating"]                    = _coerce(result.get("places_rating"))
+            df.at[idx, "places_user_rating_count"]         = ""   # not in EnrichResponse
+            df.at[idx, "matched_name"]                     = _coerce(result.get("matched_name"))
+            df.at[idx, "places_business_status"]           = _coerce(result.get("places_business_status"))
+            df.at[idx, "places_primary_type"]              = _coerce(result.get("places_primary_type"))
+            df.at[idx, "places_primary_type_display_name"] = ""   # not in EnrichResponse
+            df.at[idx, "places_latitude"]                  = _coerce(result.get("places_latitude"))
+            df.at[idx, "places_longitude"]                 = _coerce(result.get("places_longitude"))
+            df.at[idx, "places_place_id"]                  = _coerce(result.get("places_place_id"))
         else:
-            global_website = ""
-        resolved_website = local_website or global_website
+            for col in _BRANCH_COLS_CLEAR:
+                df.at[idx, col] = ""
 
-        company_status, company_pick, found_url_value = _resolve_company(
-            candidates, co_branch_norms, resolved_website,
+        # ── Retail type ────────────────────────────────────────────────────
+        is_channel = is_channel_row(str(row.get(COMPANY_COL, "")))
+        df.at[idx, "retail_type"] = classify_retail_type(
+            row_is_channel=is_channel,
+            primary_type=df.at[idx, "places_primary_type"] or None,
+            has_opening_hours=bool(df.at[idx, "places_regular_opening_hours"]),
         )
 
-        for idx in indices:
-            row          = df.loc[idx]
-            row_channel  = is_channel_row(str(row.get(COMPANY_COL, "")))
-            ping_row     = ping_df.loc[idx] if idx in ping_df.index else {}
+        # ── Optional URL backfill ──────────────────────────────────────────
+        _maybe_backfill_url(df, idx, URL_COL, enrichment_src, result)
 
-            _write_url_check_cols(df, idx, ping_row, idx in already_alive_set, found_url_value)
-            branch, match_conf, enrichment_src = _resolve_row(
-                row, idx, row_channel, company_status,
-                candidates, found_url_value,
-            )
-
-            df.at[idx, "enrichment_source"]   = enrichment_src
-            df.at[idx, "address_match"]       = branch is not None
-            df.at[idx, "match_confidence"]    = match_conf
-            df.at[idx, "enrichment_run_date"] = today_iso
-
-            if branch:
-                _write_branch_cols(df, idx, branch, _coerce)
-            else:
-                for col in _BRANCH_COLS_CLEAR:
-                    df.at[idx, col] = ""
-
-            df.at[idx, "retail_type"] = classify_retail_type(
-                row_is_channel=row_channel,
-                primary_type=df.at[idx, "places_primary_type"] or None,
-                has_opening_hours=bool(df.at[idx, "places_regular_opening_hours"]),
-            )
-
-            _maybe_backfill_url(df, idx, URL_COL, enrichment_src, company_pick)
-
-        time.sleep(0.05)  # gentle rate limit between companies
+        time.sleep(0.05)  # gentle rate limit between rows
 
 
-def _pick_location_hint(df: pd.DataFrame, indices: list) -> tuple:
-    """Return (city, state) from the first row that has both."""
-    for hi in indices:
-        r = df.loc[hi]
-        c = str(r.get("city",  "") or "").strip()
-        s = str(r.get("state", "") or "").strip()
-        if c and c.lower() not in ("nan", "") and s and s.lower() not in ("nan", ""):
-            return c, s
-        if c and c.lower() not in ("nan", ""):
-            return c, ""
-    return "", ""
-
-
-def _best_website(candidates: list) -> str:
-    """Root domain of the first candidate that has a website URL."""
-    for cand in (candidates or []):
-        w = (cand.get("website_url") or "").strip()
-        if w:
-            root = extract_root_domain(w)
-            return root if root else w
-    return ""
-
-
-def _resolve_company(candidates, branch_norms: list, resolved_website: str) -> tuple:
+def _maybe_backfill_url(df, idx, url_col, enrichment_src: str, result: dict) -> None:
     """
-    Determine company-level resolution status, winning candidate, and found_url.
-    Returns (status, company_pick, found_url_value).
+    Optionally write the found website URL back into the original URL column.
+    Uses new enrichment_source values: address_validation | text_search.
     """
-    if candidates is None:
-        return "enrichment_error", None, WEBSITE_NOT_FOUND_LABEL
-    if not candidates:
-        return "not_found", None, WEBSITE_NOT_FOUND_LABEL
-    if not branch_norms:
-        if ACCEPT_UNVERIFIED_MATCH:
-            found = resolved_website or WEBSITE_NOT_FOUND_LABEL
-            return "unverified_match", candidates[0], found
-        return "address_mismatch", None, WEBSITE_NOT_FOUND_LABEL
-
-    company_pick = pick_places_result_for_company(candidates, branch_norms)
-    if company_pick is None:
-        return "address_mismatch", None, WEBSITE_NOT_FOUND_LABEL
-    found = resolved_website or WEBSITE_NOT_FOUND_LABEL
-    return "resolved", company_pick, found
-
-
-def _resolve_row(row, idx, row_channel, company_status, candidates, found_url_value) -> tuple:
-    """Determine per-row branch candidate, match confidence, and enrichment_source."""
-    if company_status in ("not_found", "enrichment_error"):
-        return None, "none", company_status
-
-    if company_status == "address_mismatch" and not row_channel:
-        return None, "none", "address_mismatch"
-
-    # Channel row or unverified/resolved company — pick branch candidate
-    if row_channel:
-        branch = candidates[0] if candidates else None
-        return branch, "none", "unverified_match"
-
-    if company_status == "unverified_match":
-        branch = candidates[0] if candidates else None
-        return branch, "none", "unverified_match"
-
-    # Normal verified path
-    branch, match_conf = pick_branch_candidate_for_row(
-        candidates,
-        row.get("city", ""),
-        row.get("state", ""),
-        row.get("zip code", ""),
-    )
-    enrichment_src = "hybrid_full" if branch else "hybrid_website_only"
-    return branch, match_conf, enrichment_src
-
-
-def _write_url_check_cols(df, idx, ping_row, is_alive, found_url_value) -> None:
-    http_code = ping_row.get("_http_code")
-    df.at[idx, "url_check_status"] = ping_row.get("_url_status", "missing")
-    df.at[idx, "url_http_code"]    = str(http_code) if http_code is not None else ""
-    if not is_alive:
-        df.at[idx, "found_url"]         = found_url_value
-        df.at[idx, "found_url_type"]    = classify_url(found_url_value)
-        df.at[idx, "found_root_domain"] = extract_root_domain(found_url_value)
-
-
-def _write_branch_cols(df, idx, branch, coerce) -> None:
-    df.at[idx, "places_formatted_address"]         = coerce(branch.get("formatted_address"))
-    df.at[idx, "places_national_phone"]            = coerce(branch.get("national_phone_number"))
-    df.at[idx, "found_maps_url"]                   = coerce(branch.get("maps_url"))
-    df.at[idx, "places_regular_opening_hours"]     = coerce(branch.get("regular_opening_hours"))
-    df.at[idx, "places_rating"]                    = coerce(branch.get("rating"))
-    df.at[idx, "places_user_rating_count"]         = coerce(branch.get("user_rating_count"))
-    df.at[idx, "matched_name"]                     = coerce(branch.get("matched_name"))
-    df.at[idx, "places_business_status"]           = coerce(branch.get("business_status"))
-    df.at[idx, "places_primary_type"]              = coerce(branch.get("primary_type"))
-    df.at[idx, "places_primary_type_display_name"] = coerce(branch.get("primary_type_display_name"))
-    df.at[idx, "places_latitude"]                  = coerce(branch.get("latitude"))
-    df.at[idx, "places_longitude"]                 = coerce(branch.get("longitude"))
-    df.at[idx, "places_place_id"]                  = coerce(branch.get("place_id"))
+    if not FILL_BLANK_WEBSITE_WHEN_MATCHED:
+        return
+    if enrichment_src not in ("address_validation", "text_search"):
+        return
+    found_url = result.get("found_url") or ""
+    if not found_url or found_url == WEBSITE_NOT_FOUND_LABEL:
+        return
+    if not is_url_blank_or_invalid(df.at[idx, url_col]):
+        return
+    df.at[idx, url_col]              = found_url
+    df.at[idx, "url_was_backfilled"] = True
+    df.at[idx, "found_url_type"]     = classify_url(found_url)
+    df.at[idx, "found_root_domain"]  = extract_root_domain(found_url)
 
 
 def _write_no_company_row(df, ping_df, idx) -> None:
@@ -462,23 +388,6 @@ def _write_no_company_row(df, ping_df, idx) -> None:
     df.at[idx, "url_http_code"]      = str(http_code) if http_code is not None else ""
     for col in _BRANCH_COLS_CLEAR:
         df.at[idx, col] = ""
-
-
-def _maybe_backfill_url(df, idx, url_col, enrichment_src, company_pick) -> None:
-    """Optionally write the found website URL back into the original URL column."""
-    if not FILL_BLANK_WEBSITE_WHEN_MATCHED:
-        return
-    if enrichment_src not in ("hybrid_full", "hybrid_website_only", "unverified_match"):
-        return
-    if not (company_pick and company_pick.get("website_url")):
-        return
-    if not is_url_blank_or_invalid(df.at[idx, url_col]):
-        return
-    new_url = company_pick["website_url"]
-    df.at[idx, url_col]             = new_url
-    df.at[idx, "url_was_backfilled"] = True
-    df.at[idx, "found_url_type"]    = classify_url(new_url)
-    df.at[idx, "found_root_domain"] = extract_root_domain(new_url)
 
 
 # ---------------------------------------------------------------------------

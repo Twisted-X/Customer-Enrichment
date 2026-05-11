@@ -18,9 +18,7 @@ import re
 import xml.etree.ElementTree as ET
 from urllib.parse import urlparse as _urlparse
 
-import requests
-
-from ._http import HTTP_HEADERS
+from ._http_client import http_get
 
 log = logging.getLogger(__name__)
 
@@ -74,8 +72,8 @@ def _collect_candidates(base_url: str) -> list:
     """Read robots.txt for Sitemap: directives; append standard fallbacks."""
     candidates: list = []
     try:
-        r = requests.get(f"{base_url}/robots.txt", timeout=5, headers=HTTP_HEADERS)
-        if r.status_code == 200:
+        r = http_get(f"{base_url}/robots.txt", timeout=5)
+        if r is not None and r.status_code == 200:
             for line in r.text.splitlines():
                 if line.lower().startswith("sitemap:"):
                     sm_url = line.split(":", 1)[1].strip()
@@ -93,8 +91,8 @@ def _collect_candidates(base_url: str) -> list:
 def _process_candidate(candidate: str, n_checked: int, any_fetched: bool):
     """Fetch one sitemap, scan page URLs, recurse into child sitemaps (≤3)."""
     try:
-        r = requests.get(candidate, timeout=8, headers=HTTP_HEADERS)
-        if r.status_code != 200:
+        r = http_get(candidate, timeout=8)
+        if r is None or r.status_code != 200:
             return None, n_checked, any_fetched
 
         any_fetched = True
@@ -121,8 +119,8 @@ def _scan_children(child_locs: list, n_checked: int):
         if n_checked >= 2000 or i >= 3:
             break
         try:
-            rc = requests.get(child_url, timeout=8, headers=HTTP_HEADERS)
-            if rc.status_code != 200:
+            rc = http_get(child_url, timeout=8)
+            if rc is None or rc.status_code != 200:
                 continue
             child_page_locs, _ = _parse_sitemap(rc.content, child_url.endswith(".gz"))
             for loc in child_page_locs:

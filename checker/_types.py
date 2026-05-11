@@ -25,25 +25,6 @@ class ScanResult(TypedDict):
     sample_products: List[SampleProduct]
 
 
-class LayerResult(TypedDict):
-    """
-    Returned by Layer-1 (HTTP) and Layer-2 (sitemap) checks.
-
-    is_definitive: True  → caller should short-circuit and return immediately.
-    is_definitive: False → fall through to the next layer.
-    """
-    success: bool
-    is_definitive: bool
-    sells_twisted_x: bool
-    confidence: str             # "high" | "medium" | "low"
-    proof: List[str]
-    sample_products: List[SampleProduct]
-    page_url: Optional[str]
-    blocked: bool
-    error: Optional[str]
-    sells_footwear: Optional[bool]
-    blocked_reasons: Optional[str]
-
 
 class SearchOutcome(TypedDict):
     """
