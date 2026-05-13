@@ -51,13 +51,23 @@ Results from both flows feed back into NetSuite via Celigo (a cloud iPaaS the IT
 +------------------------------------------------------------------+
 |                       Celigo Cloud Platform                       |
 |                                                                    |
-|   Scheduled Flow:                                                  |
+|   Flow A — Retailer Detection (scheduled):                        |
 |     1. Pull retailer URLs from NetSuite                           |
 |     2. POST /api/check   -> yes/no + SKUs                         |
 |     3. POST /api/scrape  -> raw DOM product blocks                 |
 |     4. LLM extraction via Anthropic connector (Claude)             |
 |     5. POST /api/verify  -> anti-hallucination check              |
 |     6. Write verified products back to NetSuite                    |
+|                                                                    |
+|   Flow B — Customer Enrichment (scheduled):                       |
+|     1. Pull customer records from NetSuite                        |
+|     2. POST /api/enrich/ttl-check -> skip fresh records           |
+|     3. POST /api/enrich/url-ping  -> flag dead/missing URLs       |
+|     4. POST /api/enrich/batch     -> enrich stale records         |
+|     5. POST /api/enrich/classify-retail -> retail type            |
+|     6. POST /api/check (optional) -> product signals              |
+|     7. Celigo native mapping -> compute online_sales_status       |
+|     8. Write enriched fields back to NetSuite                     |
 +-----------------------------+------------------------------------+
                               | Celigo Gateway (secure tunnel)
                               v
@@ -88,11 +98,11 @@ Results from both flows feed back into NetSuite via Celigo (a cloud iPaaS the IT
        +--------------------+    |  - Places Text Search   |
                                  +-------------------------+
 
-Separately, the enrichment pipeline runs as a standalone CLI:
+The enrichment/ package is shared by both the Celigo API flow and the
+fallback CLI script (url_enrichment_pipeline.py / POST /api/enrich/pipeline):
 
 +------------------------------------------------------------------+
-|   url_enrichment_pipeline.py                                      |
-|   +-- enrichment/ package                                         |
+|   enrichment/ package                                             |
 |         +-- _enrich_single.py  per-row: Address Validation →     |
 |         |                      location-biased search → fallback  |
 |         +-- _address_validation.py  Google Address Validation API |
@@ -102,10 +112,7 @@ Separately, the enrichment pipeline runs as a standalone CLI:
 |         +-- _company.py   company key dedup + branch logic         |
 |         +-- _retail.py    retail type classification               |
 |         +-- _product.py   product signal -> NetSuite status        |
-+-----------------------------+------------------------------------+
-                              | SFTP (optional, when USE_SFTP=true)
-                              v
-                     NetSuite CSV file server
++------------------------------------------------------------------+
 ```
 
 **One sentence summary of each layer:**
@@ -119,7 +126,7 @@ Separately, the enrichment pipeline runs as a standalone CLI:
 | URL validation | `url_validator/` | Playwright deep-dive: sells TX? sells online? sells footwear? |
 | Single-record enrichment | `enrichment/_enrich_single.py` | Address Validation → location-biased Places search → Text Search fallback |
 | Enrichment API wrappers | `enrichment/_address_validation.py` | Google Address Validation API + location-biased Text Search wrappers |
-| Enrichment pipeline | `enrichment/` | Bulk CSV enrichment: per-row enrichment, URL ping, status computation |
+| Enrichment pipeline | `enrichment/` | Per-row enrichment logic — called by both the Celigo API endpoints and the fallback CLI script |
 | Utilities | `suggest_urls_for_bad_rows.py`, `batch_check_excel.py`, `fill_phones.py` | One-off data repair scripts |
 
 ---
@@ -138,24 +145,28 @@ playwright install chromium
 cp .env.example .env
 # Edit .env -- at minimum, set GOOGLE_PLACES_API_KEY
 
-# 4a. Start the API server (for Celigo integration)
+# 4. Start the API server
 uvicorn api_server:app --reload --port 8000
 
-# 4b. OR run the enrichment pipeline (for CSV enrichment)
-python3 url_enrichment_pipeline.py
-
-# 5. Smoke test the API
+# 5. Smoke test
 curl -X POST http://localhost:8000/api/check \
   -H 'Content-Type: application/json' \
   -d '{"url": "https://www.atwoods.com/"}'
+
+# Enrichment endpoints require the API key header:
+curl -X POST http://localhost:8000/api/enrich/ttl-check \
+  -H 'X-API-Key: your_enrich_api_key' \
+  -H 'Content-Type: application/json' \
+  -d '[{"internal_id": "NS-1", "last_enrichment_date": null}]'
 ```
 
 ### What you need in `.env` for each flow
 
 | Flow | Required variables |
 |------|--------------------|
-| API server (`/api/check`, `/api/scrape`, `/api/verify`) | None mandatory — server starts without any keys |
-| Enrichment pipeline (`url_enrichment_pipeline.py`) | `GOOGLE_PLACES_API_KEY`, `INPUT_FILE`, `OUTPUT_FILE` |
+| Retailer detection (`/api/check`, `/api/scrape`, `/api/verify`) | None mandatory — server starts without any keys |
+| Enrichment API (`/api/enrich/*`) | `GOOGLE_PLACES_API_KEY`, `ENRICH_API_KEY` |
+| Fallback CLI pipeline (`url_enrichment_pipeline.py` / `POST /api/enrich/pipeline`) | `GOOGLE_PLACES_API_KEY`, `INPUT_FILE`, `OUTPUT_FILE` |
 | SFTP mode (`USE_SFTP=true`) | All `SFTP_*` variables |
 | URL recovery (`suggest_urls_for_bad_rows.py`) | `GOOGLE_CSE_API_KEY` + `GOOGLE_CSE_CX` (optional; falls back to DuckDuckGo without them) |
 
@@ -415,6 +426,9 @@ Diagnostic interpretation: `geocoded=false` → address too vague; `geocoded=tru
 **`POST /api/enrich/online-status`** _(requires `X-API-Key`)_
 Compute the NetSuite `online_sales_status` dropdown value from enrichment + product-check signals.
 Pure logic — no API calls.
+
+> **Note:** The Celigo flow does **not** call this endpoint — Celigo handles the NetSuite field
+> mapping natively. This endpoint exists for debugging, standalone scripts, or non-Celigo callers.
 
 ```
 Request:  { "found_url": "https://www.bootbarn.com", "sells_twisted_x": "yes", "sells_anything": "yes", "sells_shoes": "yes" }
@@ -1172,39 +1186,55 @@ Celigo scheduler triggers (e.g. nightly)
 
 ---
 
-### Flow B: Customer Enrichment Pipeline (CSV)
+### Flow B: Customer Enrichment (Celigo)
+
+The enrichment flow is fully Celigo-orchestrated via the API endpoints.
+There is no CSV file hand-off — Celigo reads from NetSuite, calls the API, and writes back directly.
 
 ```
-Trigger: python3 url_enrichment_pipeline.py
-         (or Celigo via SFTP drop when USE_SFTP=true)
+Celigo scheduler triggers (e.g. nightly)
   |
-  +- Load CSV: QueryResults_837.csv
-  |   (1,800+ rows: company name, address, existing URL, enrichment date)
+  +- Pull batch of customer records from NetSuite
+  |   Fields: internal_id, company, address, city, state, zip_code,
+  |           website_url, last_enrichment_date, enrichment_source
   |
-  +- Partition: skip rows enriched within 90 days (TTL)
+  +- POST /api/enrich/ttl-check
+  |   [{internal_id, last_enrichment_date, enrichment_source}, ...]
+  |   -> {fresh: [...], stale: [...], ttl_days: 30}
+  |   Celigo skips the "fresh" IDs for this run
   |
-  +- URL ping: async HEAD -> alive/dead/redirected/blocked
-  |   (50 concurrent, ~30 seconds for 1,000 URLs)
+  +- POST /api/enrich/url-ping  (stale records only)
+  |   [{internal_id, url}, ...]
+  |   -> {alive: [...], dead: [...], missing: [...], details: [...]}
+  |   Celigo notes which URLs are dead/missing (needs new URL from enrichment)
   |
-  +- Per-row enrichment loop (_run_enrich_loop):
-  |   For each stale row: enrich_single_customer(company, address, city, state, zip)
-  |     -> Google Address Validation API -> lat/lng
-  |     -> location-biased Text Search (within 300m)
-  |     -> plain Text Search fallback
-  |     -> address_match_confidence on winner
-  |   Writes: business name, phone, address, lat/lng, place_id, hours,
-  |           enrichment_source, match_confidence, address_match
+  +- POST /api/enrich/batch  (up to 100 stale records per call)
+  |   [{company, address, city, state, zip_code, internal_id, current_url}, ...]
+  |   -> {results: [{internal_id, result: EnrichResponse}, ...], duration_sec}
+  |   Each result: found_url, phone, address, lat/lng, place_id, hours,
+  |                match_confidence, enrichment_source, address_match
   |
-  +- Product check (if ENABLE_PRODUCT_CHECK=true):
-  |   domain_signals() -> fast path for 34 known domains
-  |   POST /api/check -> for unknown domains
-  |   Writes: sells_anything, sells_shoes, sells_twisted_x
+  +- POST /api/enrich/classify-retail  (per record, using Places primary_type)
+  |   {primary_type, has_opening_hours, is_channel_row}
+  |   -> {retail_type: "retail" | "not_retail" | "unknown"}
   |
-  +- Compute: online_sales_status -> NetSuite dropdown value
+  +- POST /api/check  (optional — only for records with a live ecommerce URL)
+  |   {url: found_url}
+  |   -> {sells_twisted_x, sells_online, sells_footwear, confidence, ...}
   |
-  +- Save: QueryResults_837_Enriched.csv + .json
-     (SFTP mode: upload to /review, archive input to /archive)
+  +- Celigo native field mapping (no API call needed)
+  |   maps sells_twisted_x / sells_anything / sells_shoes / found_url
+  |   -> NetSuite online_sales_status dropdown value
+  |
+  +- Write enriched fields back to NetSuite per record
+     found_url, phone, address, lat/lng, place_id, hours,
+     match_confidence, enrichment_source, retail_type,
+     sells_twisted_x, online_sales_status
 ```
+
+**Fallback (manual / no Celigo):** `POST /api/enrich/pipeline` or
+`python3 url_enrichment_pipeline.py` — reads `INPUT_FILE`, writes `OUTPUT_FILE`.
+Use this for one-off bulk runs or if Celigo is unavailable.
 
 ---
 
