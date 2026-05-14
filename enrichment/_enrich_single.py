@@ -6,9 +6,9 @@ Public API:
                            current_url=None, internal_id=None) -> dict
 
 Lookup flow:
-  Step 1 — Google Address Validation API → placeId
-  Step 2 — Places Details API (primary path, only when placeId found)
-  Step 3 — Text Search fallback (existing pipeline code)
+  Step 1 — Google Address Validation API → lat/lng coordinates
+  Step 2 — location-biased Text Search near those coordinates (primary path)
+  Step 3 — plain Text Search fallback (when Step 1 or 2 finds nothing)
   Step 4 — address_match_confidence on winning candidate
 
 The returned dict maps directly to all fields of EnrichResponse in models.py.
@@ -152,6 +152,7 @@ def enrich_single_customer(
     upstream_error_code: str = ""
     candidate: dict | None = None
     source: str = ""
+    google_api_calls: int = 0
 
     # ── Step 2: skip Address Validation for PO boxes ──────────────────────
     is_po_box = bool(_PO_BOX_RE.match(addr_clean))
@@ -162,8 +163,10 @@ def enrich_single_customer(
         # is_business is logged inside the wrapper — NEVER used for routing.
         try:
             av_result, av_err = validate_address(addr_clean, city_clean, state_clean, zip_clean)
+            google_api_calls += 1
         except Exception as exc:
             av_result, av_err = None, _classify_error(exc)
+            google_api_calls += 1
             log.warning(
                 "enrichment validate_address unexpected escape: %s city=%s state=%s",
                 av_err, city_clean, state_clean,
@@ -188,8 +191,10 @@ def enrich_single_customer(
                     near_candidates, near_err = find_places_near_location(
                         company, lat, lng, radius_meters=300
                     )
+                    google_api_calls += 1
                 except Exception as exc:
                     near_candidates, near_err = None, _classify_error(exc)
+                    google_api_calls += 1
                     log.warning(
                         "enrichment find_places_near_location unexpected escape: %s city=%s state=%s",
                         near_err, city_clean, state_clean,
@@ -216,8 +221,10 @@ def enrich_single_customer(
         # upstream_5xx since we have no further information.
         try:
             candidates = find_places_candidates(company, city_clean, state_clean, zip_clean)
+            google_api_calls += 1
         except Exception as exc:
             candidates = None
+            google_api_calls += 1
             ts_err = _classify_error(exc)
             log.warning(
                 "enrichment find_places_candidates unexpected escape: %s city=%s state=%s",
@@ -273,8 +280,11 @@ def enrich_single_customer(
 
     # ── Build result ───────────────────────────────────────────────────────
     if candidate is not None:
-        return _candidate_to_result(candidate, source, confidence)
+        result = _candidate_to_result(candidate, source, confidence)
+        result["google_api_calls"] = google_api_calls
+        return result
 
     result = _empty_result()
     result["enrichment_source"] = source
+    result["google_api_calls"] = google_api_calls
     return result

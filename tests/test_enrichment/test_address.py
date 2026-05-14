@@ -2,7 +2,6 @@
 Tests for enrichment/_address.py — all pure functions, no network calls.
 """
 import math
-import pytest
 from enrichment._address import (
     normalize_zip,
     normalize_address_for_match,

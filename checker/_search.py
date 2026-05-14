@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import logging
 from typing import List
-from urllib.parse import urlparse as _urlparse
 
 from ._types import SearchOutcome, empty_search
 from ._scanners import scan_page_for_skus, find_brand_in_product_context

@@ -118,7 +118,7 @@ def _segment_text_into_products(text: str, images: List[Dict]) -> List[Dict]:
     Lines between boundaries become one product block.
     Images are matched to segments by position order (1:1).
     """
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
     if not lines:
         return []
 

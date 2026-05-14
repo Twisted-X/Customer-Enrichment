@@ -17,7 +17,6 @@ import pandas as pd
 
 from ._config import (
     COMPANY_COL, CHANNEL_KEYWORDS,
-    ACCEPT_UNVERIFIED_MATCH,
 )
 from ._address import normalize_address_for_match, address_match_confidence, address_matches
 from ._places import clean_company_name

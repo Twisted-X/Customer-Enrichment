@@ -3,7 +3,6 @@ Tests for enrichment/_url.py — URL classification utilities.
 
 check_url and bulk_check_urls are async + network; they belong in integration tests.
 """
-import pytest
 from enrichment._url import (
     is_url_blank_or_invalid,
     classify_url,

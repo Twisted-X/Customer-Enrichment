@@ -23,6 +23,12 @@ DEV_CACHE_DIR = os.getenv("SCRAPER_DEV_CACHE_DIR", ".dev_cache")
 # Optional comma-separated proxy list used for HTTP/browser rotation.
 PROXY_LIST = [p.strip() for p in os.getenv("PROXY_LIST", "").split(",") if p.strip()]
 
+# SerpApi — used as Layer 3 to check if a domain sells Twisted X without
+# launching a browser. Searches "Twisted X site:domain.com" via Google.
+# Free tier: 100 searches/month. Paid: ~$50/month for 5,000 searches.
+# Leave blank to disable (falls through to Playwright).
+SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
+
 # Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")

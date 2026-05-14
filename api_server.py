@@ -15,6 +15,15 @@ import time
 from datetime import datetime, timezone
 from typing import List, Optional
 
+# Idempotency cache for /api/enrich/batch — prevents re-burning Google API
+# quota when Celigo retries a timed-out request. Key → (response, expires_at).
+_IDEMPOTENCY_CACHE: dict = {}
+_IDEMPOTENCY_TTL_S = 1800  # 30 minutes
+
+# Max concurrent Playwright browsers — each costs ~150MB RAM.
+# Raise this once the server's available RAM is confirmed.
+_BROWSER_SEMAPHORE = asyncio.Semaphore(3)
+
 # Load .env before any config import so TWO_CAPTCHA_API_KEY and other env
 # vars are available when config.py reads them with os.getenv().
 try:
@@ -23,26 +32,24 @@ try:
 except ImportError:
     pass
 
-from fastapi import Depends, FastAPI, HTTPException, Security
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security.api_key import APIKeyHeader
+from fastapi import Depends, FastAPI, HTTPException, Request, Security  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.security.api_key import APIKeyHeader  # noqa: E402
 
-from models import (
+from models import (  # noqa: E402
     ScrapeRequestNew, ScrapeResponse,
     VerifyRequest, VerifyResponse,
     CheckRequest, CheckResponse,
     EnrichRequest, EnrichResponse, EnrichPipelineResponse,
-    TtlCheckItem, TtlCheckResponse,
     UrlPingItem, UrlPingDetail, UrlPingResponse,
     BatchEnrichItem, BatchEnrichResponse,
-    OnlineStatusRequest, OnlineStatusResponse,
     AddressValidateRequest, AddressValidateResponse,
     ClassifyRetailRequest, ClassifyRetailResponse,
 )
-import cleaning
-from checker._types import new_check_result
-from checker._platform import _goto_safe
-from browser_utils import pw_proxy
+import cleaning  # noqa: E402
+from checker._types import new_check_result  # noqa: E402
+from checker._platform import _goto_safe  # noqa: E402
+from browser_utils import pw_proxy  # noqa: E402
 
 
 app = FastAPI(
@@ -144,34 +151,34 @@ async def check_endpoint(request: CheckRequest):
     Returns a yes/no with proof. No product extraction, no pagination.
     Typical response time: 15-60 seconds. Times out after 180 seconds.
     """
-    import asyncio
     loop   = asyncio.get_running_loop()
     result = None
 
-    for attempt in range(2):  # retry once on transient browser crash
-        try:
-            result = await asyncio.wait_for(
-                loop.run_in_executor(None, _check_url_sync, request.url),
-                timeout=CHECK_TIMEOUT_SECONDS,
-            )
-            if attempt == 0 and result.get("error") and "Connection to page was lost" in (result.get("error") or ""):
-                await asyncio.sleep(2)
-                continue
-            break
-        except asyncio.TimeoutError:
-            from config import get_retailer_name
-            result = new_check_result(
-                request.url,
-                get_retailer_name(request.url) or "unknown",
-                error="Check timed out; please verify manually.",
-            )
-            result["sells_twisted_x"] = None
-            result["proof"] = [
-                "Twisted X: unknown (check timed out). Manual check required.",
-                f"Check timed out after {CHECK_TIMEOUT_SECONDS} seconds. "
-                "Site may be slow or unresponsive. Please verify manually.",
-            ]
-            break
+    async with _BROWSER_SEMAPHORE:
+        for attempt in range(2):  # retry once on transient browser crash
+            try:
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(None, _check_url_sync, request.url),
+                    timeout=CHECK_TIMEOUT_SECONDS,
+                )
+                if attempt == 0 and result.get("error") and "Connection to page was lost" in (result.get("error") or ""):
+                    await asyncio.sleep(2)
+                    continue
+                break
+            except asyncio.TimeoutError:
+                from config import get_retailer_name
+                result = new_check_result(
+                    request.url,
+                    get_retailer_name(request.url) or "unknown",
+                    error="Check timed out; please verify manually.",
+                )
+                result["sells_twisted_x"] = None
+                result["proof"] = [
+                    "Twisted X: unknown (check timed out). Manual check required.",
+                    f"Check timed out after {CHECK_TIMEOUT_SECONDS} seconds. "
+                    "Site may be slow or unresponsive. Please verify manually.",
+                ]
+                break
 
     if result is None:
         result = new_check_result(request.url, "unknown", error="Check failed.")
@@ -794,52 +801,6 @@ async def enrich_pipeline_endpoint():
 
 
 # =============================================================================
-# POST /api/enrich/ttl-check — TTL freshness check (no external API calls)
-# =============================================================================
-
-@app.post(
-    "/api/enrich/ttl-check",
-    response_model=TtlCheckResponse,
-    dependencies=[Depends(_require_enrich_key)],
-    summary="Check which records are stale and need re-enrichment",
-    tags=["enrichment"],
-)
-async def ttl_check_endpoint(items: List[TtlCheckItem]):
-    """
-    Check each record against the enrichment TTL (`ENRICHMENT_TTL_DAYS`, default 30).
-
-    A record is **stale** (needs re-enrichment) when:
-    - `last_enrichment_date` is null, blank, or unparseable
-    - `last_enrichment_date` is older than `ENRICHMENT_TTL_DAYS` days
-    - `enrichment_source` is `enrichment_error` or `address_mismatch`
-
-    A record is **fresh** (safe to skip) when:
-    - `last_enrichment_date` is within `ENRICHMENT_TTL_DAYS` days AND no previous error
-
-    Pure date logic — no Google API calls, instant response.
-
-    Works for a single record (`[{...}]`) or a batch (`[{...}, ...]`).
-    """
-    from enrichment._io import should_enrich
-    from enrichment._config import ENRICHMENT_TTL_DAYS as _TTL
-
-    fresh: list[str] = []
-    stale: list[str] = []
-
-    for item in items:
-        row = {
-            "last_enrichment_date": item.last_enrichment_date,
-            "enrichment_source":    item.enrichment_source or "",
-        }
-        if should_enrich(row):
-            stale.append(item.internal_id)
-        else:
-            fresh.append(item.internal_id)
-
-    return TtlCheckResponse(fresh=fresh, stale=stale, ttl_days=_TTL)
-
-
-# =============================================================================
 # POST /api/enrich/url-ping — Bulk URL liveness check
 # =============================================================================
 
@@ -908,7 +869,7 @@ async def url_ping_endpoint(items: List[UrlPingItem]):
     summary="Enrich multiple customer records concurrently",
     tags=["enrichment"],
 )
-async def enrich_batch_endpoint(items: List[EnrichRequest]):
+async def enrich_batch_endpoint(request: Request, items: List[EnrichRequest]):
     """
     Enrich up to **100 records** in a single call.  Records are processed
     concurrently via a thread-pool, so a 20-record batch takes roughly the
@@ -920,11 +881,25 @@ async def enrich_batch_endpoint(items: List[EnrichRequest]):
 
     Same enrichment flow as `POST /api/enrich` per record:
     Address Validation → location-biased Text Search → Text Search fallback.
+
+    **Idempotency**: pass `X-Idempotency-Key: <uuid>` to make retries safe.
+    The server caches the response for 30 minutes — a retry with the same key
+    returns the cached result immediately without re-calling Google APIs.
     """
     import logging as _logging
 
     if len(items) > 100:
         raise HTTPException(status_code=422, detail="Batch size exceeds maximum of 100 records")
+
+    # ── Idempotency check ────────────────────────────────────────────────────
+    idem_key = request.headers.get("X-Idempotency-Key", "").strip() or None
+    if idem_key:
+        cached = _IDEMPOTENCY_CACHE.get(idem_key)
+        if cached and time.monotonic() < cached[1]:
+            _logging.getLogger(__name__).info(
+                "enrich/batch idempotency hit for key %s — returning cached response", idem_key[:16]
+            )
+            return cached[0]
 
     loop = asyncio.get_running_loop()
     t0   = time.monotonic()
@@ -950,48 +925,26 @@ async def enrich_batch_endpoint(items: List[EnrichRequest]):
         BatchEnrichItem(internal_id=item.internal_id or "", result=EnrichResponse(**res))
         for item, res in zip(items, raw_results)
     ]
-    return BatchEnrichResponse(results=batch_results, total=len(batch_results), duration_sec=duration_sec)
+    total_google_calls = sum(r.get("google_api_calls", 0) for r in raw_results)
+    total_quota_errors = sum(1 for r in raw_results if r.get("enrichment_source") == "quota")
+    response = BatchEnrichResponse(
+        results=batch_results,
+        total=len(batch_results),
+        duration_sec=duration_sec,
+        google_api_calls=total_google_calls,
+        quota_errors=total_quota_errors,
+    )
 
+    # ── Cache response for idempotency ───────────────────────────────────────
+    if idem_key:
+        _IDEMPOTENCY_CACHE[idem_key] = (response, time.monotonic() + _IDEMPOTENCY_TTL_S)
+        # Evict expired entries to prevent unbounded memory growth
+        now = time.monotonic()
+        expired = [k for k, (_, exp) in _IDEMPOTENCY_CACHE.items() if exp < now]
+        for k in expired:
+            _IDEMPOTENCY_CACHE.pop(k, None)
 
-# =============================================================================
-# POST /api/enrich/online-status — Compute NetSuite online_sales_status
-# =============================================================================
-
-@app.post(
-    "/api/enrich/online-status",
-    response_model=OnlineStatusResponse,
-    dependencies=[Depends(_require_enrich_key)],
-    summary="Compute NetSuite online_sales_status dropdown value",
-    tags=["enrichment"],
-)
-async def online_status_endpoint(request: OnlineStatusRequest):
-    """
-    Compute the NetSuite `online_sales_status` dropdown value from enrichment
-    and product-check signals.
-
-    **Priority order** (first match wins):
-
-    | Condition | Result |
-    |---|---|
-    | No website / blank URL | `No Website` |
-    | `sells_twisted_x = yes` | `Ecommerce Site : Sells Twisted X` |
-    | `sells_anything = yes` + `sells_shoes = yes` | `Ecommerce Site : Opportunity` |
-    | `sells_anything = yes` + `sells_shoes = no` | `Ecommerce Site : Does Not Sell Twisted X` |
-    | `sells_anything = no` | `No Ecommerce` |
-    | Insufficient data | `""` (blank) |
-
-    Pure logic — no external API calls, instant response.
-    """
-    from enrichment._product import compute_online_sales_status
-    from enrichment._config import URL_COL as _URL_COL
-
-    row = {
-        _URL_COL:          request.found_url or "",
-        "sells_twisted_x": request.sells_twisted_x or "",
-        "sells_anything":  request.sells_anything  or "",
-        "sells_shoes":     request.sells_shoes      or "",
-    }
-    return OnlineStatusResponse(online_sales_status=compute_online_sales_status(row))
+    return response
 
 
 # =============================================================================
@@ -1053,6 +1006,40 @@ async def address_validate_endpoint(request: AddressValidateRequest):
     )
 
 
+
+
+# =============================================================================
+# GET /api/retailers/urls — List retailer URLs from CSV
+# =============================================================================
+
+@app.get("/api/retailers/urls")
+async def get_retailer_urls():
+    """Get list of all retailer URLs from CSV file."""
+    import csv
+    from config import RETAILER_URLS
+
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    csv_path     = os.path.join(project_root, "data", "url_validation_full_updated_filtered_online_only.csv")
+
+    urls = []
+    try:
+        if os.path.exists(csv_path):
+            with open(csv_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    url = row.get("Web Address", "").strip()
+                    if url and url.startswith("http"):
+                        urls.append(url)
+        else:
+            urls = RETAILER_URLS
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).error("Error reading retailer CSV: %s", exc)
+        urls = RETAILER_URLS
+
+    return {"urls": sorted(urls), "count": len(urls)}
+
+
 # =============================================================================
 # POST /api/enrich/classify-retail — Retail type classification
 # =============================================================================
@@ -1089,38 +1076,6 @@ async def classify_retail_endpoint(request: ClassifyRetailRequest):
         has_opening_hours=request.has_opening_hours,
     )
     return ClassifyRetailResponse(retail_type=retail_type)
-
-
-# =============================================================================
-# GET /api/retailers/urls — List retailer URLs from CSV
-# =============================================================================
-
-@app.get("/api/retailers/urls")
-async def get_retailer_urls():
-    """Get list of all retailer URLs from CSV file."""
-    import csv
-    from config import RETAILER_URLS
-
-    project_root = os.path.dirname(os.path.abspath(__file__))
-    csv_path     = os.path.join(project_root, "data", "url_validation_full_updated_filtered_online_only.csv")
-
-    urls = []
-    try:
-        if os.path.exists(csv_path):
-            with open(csv_path, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    url = row.get("Web Address", "").strip()
-                    if url and url.startswith("http"):
-                        urls.append(url)
-        else:
-            urls = RETAILER_URLS
-    except Exception as exc:
-        import logging
-        logging.getLogger(__name__).error("Error reading retailer CSV: %s", exc)
-        urls = RETAILER_URLS
-
-    return {"urls": sorted(urls), "count": len(urls)}
 
 
 if __name__ == "__main__":

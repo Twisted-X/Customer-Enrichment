@@ -66,6 +66,7 @@ class CheckResponse(BaseModel):
     error: Optional[str] = Field(default=None, description="Error message if check failed")
     blocked: bool = Field(default=False, description="True if site appears to block automated access; verify manually")
     blocked_reasons: Optional[str] = Field(default=None, description="Why the site was marked as blocked (e.g. Cloudflare, bot detection)")
+    detection_layer: str = Field(default="layer4_playwright", description="Which layer determined the result: layer1_http, layer2_sitemap, layer3_serp, layer4_playwright")
 
 
 # =============================================================================
@@ -120,6 +121,7 @@ class EnrichResponse(BaseModel):
     match_confidence:             str             = Field(default="none", description="Address match confidence: high | medium | low | none")
     enrichment_source:            str             = Field(default="",     description="How the result was obtained: address_validation | text_search | not_found | enrichment_error")
     address_match:                bool            = Field(default=False,  description="True when match_confidence != none AND places_place_id is not null")
+    google_api_calls:             int             = Field(default=0,      description="Number of Google API calls made to enrich this record (0–3)")
 
 
 class EnrichPipelineResponse(BaseModel):
@@ -129,24 +131,6 @@ class EnrichPipelineResponse(BaseModel):
     started_at:   str            = Field(...,        description="ISO 8601 UTC timestamp when the pipeline started")
     completed_at: str            = Field(default="", description="ISO 8601 UTC timestamp when the pipeline completed")
     duration_sec: Optional[float] = Field(default=None, description="Total pipeline runtime in seconds")
-
-
-# =============================================================================
-# /api/enrich/ttl-check models
-# =============================================================================
-
-class TtlCheckItem(BaseModel):
-    """Single record to check against the enrichment TTL."""
-    internal_id:          str           = Field(...,          min_length=1, max_length=50,  description="NetSuite internal ID")
-    last_enrichment_date: Optional[str] = Field(default=None, max_length=50,               description="ISO date of last enrichment — null/blank means never enriched")
-    enrichment_source:    Optional[str] = Field(default=None, max_length=50,               description="Previous enrichment_source value; 'enrichment_error' or 'address_mismatch' forces re-enrich regardless of TTL")
-
-
-class TtlCheckResponse(BaseModel):
-    """Response from POST /api/enrich/ttl-check"""
-    fresh:    List[str] = Field(default_factory=list, description="IDs enriched within TTL — safe to skip")
-    stale:    List[str] = Field(default_factory=list, description="IDs that need re-enrichment (never enriched, past TTL, or previous error)")
-    ttl_days: int       = Field(...,                  description="TTL window used for this check in days")
 
 
 # =============================================================================
@@ -187,31 +171,11 @@ class BatchEnrichItem(BaseModel):
 
 class BatchEnrichResponse(BaseModel):
     """Response from POST /api/enrich/batch"""
-    results:     List[BatchEnrichItem] = Field(default_factory=list, description="Per-record enrichment results in the same order as the request")
-    total:       int                   = Field(...,                  description="Number of records processed")
-    duration_sec: float                = Field(...,                  description="Total wall-clock time for all concurrent enrichments")
-
-
-# =============================================================================
-# /api/enrich/online-status models
-# =============================================================================
-
-class OnlineStatusRequest(BaseModel):
-    """Input signals for NetSuite online_sales_status computation."""
-    found_url:       Optional[str] = Field(default=None, max_length=500, description="Website URL found by enrichment (null / blank = no website)")
-    sells_twisted_x: Optional[str] = Field(default=None, max_length=10,  description="Product check result: 'yes' | 'no' | null")
-    sells_anything:  Optional[str] = Field(default=None, max_length=10,  description="Product check result: 'yes' | 'no' | null")
-    sells_shoes:     Optional[str] = Field(default=None, max_length=10,  description="Product check result: 'yes' | 'no' | null")
-
-
-class OnlineStatusResponse(BaseModel):
-    """Response from POST /api/enrich/online-status"""
-    online_sales_status: str = Field(..., description=(
-        "NetSuite dropdown value: "
-        "'No Website' | 'Ecommerce Site : Sells Twisted X' | "
-        "'Ecommerce Site : Opportunity' | 'Ecommerce Site : Does Not Sell Twisted X' | "
-        "'No Ecommerce' | '' (insufficient data)"
-    ))
+    results:          List[BatchEnrichItem] = Field(default_factory=list, description="Per-record enrichment results in the same order as the request")
+    total:            int                   = Field(...,                  description="Number of records processed")
+    duration_sec:     float                 = Field(...,                  description="Total wall-clock time for all concurrent enrichments")
+    google_api_calls: int                   = Field(default=0,            description="Total Google API calls made across all records in this batch")
+    quota_errors:     int                   = Field(default=0,            description="Number of records that hit Google quota limits (enrichment_source='quota')")
 
 
 # =============================================================================

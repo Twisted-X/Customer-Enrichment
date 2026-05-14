@@ -1,7 +1,6 @@
 """
 Tests for enrichment/_retail.py — retail classification and known-domain lookup.
 """
-import pytest
 from enrichment._retail import (
     classify_retail_type,
     domain_signals,

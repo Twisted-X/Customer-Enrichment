@@ -5,7 +5,6 @@ load_dataframe, save_output, sftp_session are not exercised here because
 they require real files or SFTP credentials; those belong in integration tests.
 """
 import datetime
-import pytest
 from enrichment._io import should_enrich
 from enrichment._config import NETSUITE_LAST_ENRICHED_COL, ENRICHMENT_TTL_DAYS
 

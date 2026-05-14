@@ -4,7 +4,6 @@ Tests for enrichment/_product.py — compute_online_sales_status (all 6 paths).
 check_product_signals is not tested here because it requires either a
 running api_server or network access; that belongs in integration tests.
 """
-import pytest
 from enrichment._product import compute_online_sales_status
 from enrichment._config import URL_COL
 

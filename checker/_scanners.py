@@ -309,7 +309,7 @@ def _text_based_samples(
         limit: Maximum products to return.  Pass ``None`` for no cap.
     """
     samples: List[SampleProduct] = []
-    lines = [l.strip() for l in page_text.split('\n') if l.strip()]
+    lines = [ln.strip() for ln in page_text.split('\n') if ln.strip()]
 
     for i, line in enumerate(lines):
         for code in list(matched_codes):
@@ -342,7 +342,7 @@ def _parse_name_price(text: str) -> Tuple[str, str]:
     """Extract product name and price from link inner text."""
     name, price = "", "N/A"
     skip = {'filter', 'sort', 'search', 'results for', 'shop all'}
-    for line in (l.strip() for l in text.split('\n') if l.strip()):
+    for line in (ln.strip() for ln in text.split('\n') if ln.strip()):
         ll = line.lower()
         if any(w in ll for w in skip):
             continue

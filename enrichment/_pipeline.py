@@ -14,14 +14,13 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
-from typing import Optional
 
 import pandas as pd
 from tqdm import tqdm
 
 from ._config import (
     USE_SFTP, INPUT_FILE, OUTPUT_FILE,
-    COMPANY_COL, URL_COL, ADDRESS_COLS, NETSUITE_ID_COL,
+    COMPANY_COL, URL_COL, NETSUITE_ID_COL,
     NETSUITE_LAST_ENRICHED_COL, ENRICHMENT_TTL_DAYS,
     PING_EXISTING_URLS, FILL_BLANK_WEBSITE_WHEN_MATCHED,
     ENABLE_PRODUCT_CHECK, CHECK_WORKERS,

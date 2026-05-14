@@ -35,15 +35,15 @@ def _body_text(page: Page, timeout: int = 10_000) -> str:
         except Exception:
             return ''
 
-from ._constants import (
+from ._constants import (  # noqa: E402
     _NO_RESULTS_PHRASES,
     _PURCHASE_BUTTON_SELECTORS,
     _CART_SELECTORS,
     _ONLINE_BLOCKER_PHRASES,
     SEARCH_GROWTH_RATIO,
 )
-from ._brand import _check_brand_in_content, _check_product_links
-from ._browser import _search_on_site, _try_category_pages
+from ._brand import _check_brand_in_content, _check_product_links  # noqa: E402
+from ._browser import _search_on_site, _try_category_pages  # noqa: E402
 
 log = logging.getLogger(__name__)
 

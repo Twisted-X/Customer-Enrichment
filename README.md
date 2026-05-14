@@ -20,11 +20,12 @@ For full detail on every file, data flow, and design decision, see
 api_server.py               FastAPI service — /api/check, /api/scrape, /api/verify
 url_enrichment_pipeline.py  Entry point for the CSV enrichment pipeline
 
-checker/                    3-layer retailer detection package
+checker/                    4-layer retailer detection package
   __init__.py               run_check(url) — public entry point
   _http.py                  Layer 1: plain HTTP scan (no browser)
   _sitemap.py               Layer 2: sitemap URL slug scan (no browser)
-  _playwright.py            Layer 3: full Playwright browser check
+  _serp.py                  Layer 3: SerpApi Google Search (no browser — bypasses bot protection)
+  _playwright.py            Layer 4: full Playwright browser check
   _platform.py              Shopify / WooCommerce / NetSuite / generic detection
   _search.py                Platform-aware search strategies
   _scanners.py              SKU fingerprint + brand-context DOM scanning
@@ -44,7 +45,7 @@ enrichment/                 Customer enrichment package
   _product.py               Product signals -> NetSuite online_sales_status
   _io.py                    CSV/Excel load, save, SFTP upload
 
-url_validator/              Playwright deep validator (used by checker Layer 3)
+url_validator/              Playwright deep validator (used by checker Layer 4)
   __init__.py               Public re-exports — all existing import patterns preserved
   __main__.py               CLI: python -m url_validator [input.csv [output.csv]]
   _constants.py             All selector lists and config values (pure data, no Playwright)
@@ -58,7 +59,7 @@ cleaning.py                 DOM product block extraction (used by /api/scrape)
                             Scrolls page before extraction to load lazy content; max 300 products
 verifier.py                 Anti-hallucination verification (used by /api/verify)
 models.py                   Pydantic request/response schemas (scrape max_pages default: 15)
-config.py                   SKU database + Playwright settings
+config.py                   SKU database + Playwright settings + SerpApi key
 brand_config.py             Loader for config/brand_indicators.json
 sftp_connect.py             SFTP multi-auth helper
 
@@ -76,7 +77,6 @@ data/
   QueryResults_837.csv      Active NetSuite input (current enrichment run)
   ...                       Reference datasets and URL work queues
 
-suggest_urls_for_bad_rows.py   Find correct URLs for missing/broken rows
 batch_check_excel.py           Bulk check Excel file via /api/check
 check_suggested_urls.py        Validate suggested URLs via /api/check
 fill_phones.py                 Fill missing phone numbers via Google Places
@@ -89,26 +89,36 @@ tests/manual/               Manual smoke-test scripts (not pytest)
 
 ## How the detection works
 
-`checker.run_check(url)` runs three layers in order and short-circuits as soon
+`checker.run_check(url)` runs four layers in order and short-circuits as soon
 as it has a definitive answer:
 
 ```
 Layer 1 — HTTP scan (no browser, ~1 request)
   Plain GET with Chrome UA. Scans HTML for TX style codes (MCA0070, ICA0035...).
+  sells_online derived from whether found products have a price or product URL.
   If a SKU matches -> definitive YES, stop.
 
-Layer 2 — Sitemap scan (no browser, ~2-5 requests)
-  Fetches robots.txt + sitemap.xml. Scans <loc> URLs for "twisted-x" slugs.
+Layer 2 — Sitemap scan (no browser, ~2-10 requests)
+  Fetches robots.txt + sitemap.xml. Prioritises product/brand/category child
+  sitemaps; skips blog/news/video sitemaps entirely. Scans all <loc> URLs for
+  "twisted-x", "twistedx", "tx-boots", "tx-footwear" etc. slugs.
   If TX slug found -> definitive YES, stop.
 
-Layer 3 — Playwright (real browser, 15-60 seconds)
+Layer 3 — SerpApi Google Search (no browser, ~1 API call)
+  Searches Google for "Twisted X site:<domain>" via SerpApi JSON API.
+  Bypasses Cloudflare / PerimeterX — Google has already indexed the site.
+  If Google results found -> definitive YES, stop.
+  No results is NOT a definitive NO (small sites may not be indexed).
+
+Layer 4 — Playwright (real browser, 15-60 seconds)
   Detects platform (Shopify / WooCommerce / NetSuite / custom).
   Runs platform-appropriate search for "Twisted X".
   Scans results for SKUs and brand names.
   Delegates online-sales + footwear detection to the url_validator/ package.
 ```
 
-Roughly 30% of retailers are resolved by Layers 1 or 2 with no browser needed.
+Layers 1-3 are cheap. Layer 4 is expensive. The design short-circuits so
+Playwright only runs when the three cheap layers are all inconclusive.
 
 ---
 
@@ -124,7 +134,7 @@ playwright install chromium
 
 # Configure secrets
 cp .env.example .env
-# Edit .env -- fill in GOOGLE_PLACES_API_KEY and any SFTP credentials
+# Edit .env -- fill in GOOGLE_PLACES_API_KEY, ENRICH_API_KEY, SERPAPI_KEY
 ```
 
 ---
@@ -162,12 +172,9 @@ curl -X POST http://localhost:8000/api/check \
 | Endpoint | What it does |
 |----------|-------------|
 | `POST /api/enrich` | Enrich one customer record: Address Validation → Places Details → Text Search fallback |
-| `POST /api/enrich/batch` | Enrich up to 100 records concurrently (same flow as single, results in request order) |
-| `POST /api/enrich/pipeline` | Run the full CSV batch pipeline (reads `INPUT_FILE`, writes `OUTPUT_FILE`; long-running) |
-| `POST /api/enrich/ttl-check` | Which records are stale and need re-enrichment? (pure date logic, no API calls) |
+| `POST /api/enrich/batch` | Enrich up to 100 records concurrently. Supports `X-Idempotency-Key` header (30 min cache). Returns `google_api_calls` + `quota_errors` totals. |
 | `POST /api/enrich/url-ping` | Are these URLs still alive? Returns alive/dead/missing buckets with HTTP codes |
 | `POST /api/enrich/address-validate` | Debug: geocode a single address (Address Validation API only, no Places lookup) |
-| `POST /api/enrich/online-status` | Compute NetSuite `online_sales_status` dropdown value from enrichment signals |
 | `POST /api/enrich/classify-retail` | Classify a business as `retail` / `not_retail` / `unknown` (pure logic, no API calls) |
 
 ---
@@ -226,11 +233,6 @@ at startup if it is missing.
 All require the API server running on port 8000 unless noted.
 
 ```bash
-# Find correct URLs for retailers with no/broken website
-python3 suggest_urls_for_bad_rows.py \
-  --input  data/missing_urls_from_custom_customer_search.csv \
-  --output data/missing_urls_fixed.csv
-
 # Bulk check an Excel file of retailer URLs
 python3 batch_check_excel.py --input retailers.xlsx --url-col "website url"
 
@@ -254,13 +256,12 @@ full list with descriptions. Key variables:
 |----------|-------------|-------------|
 | `GOOGLE_PLACES_API_KEY` | Enrichment pipeline + enrich API | Google Places Text Search + Address Validation |
 | `ENRICH_API_KEY` | All `/api/enrich/*` endpoints | Shared secret — pass as `X-API-Key` header |
-| `GOOGLE_CSE_API_KEY` + `GOOGLE_CSE_CX` | URL recovery script | Fallback URL search |
+| `SERPAPI_KEY` | Layer 3 retailer detection | SerpApi Google Search — bypasses bot protection on major retailers. Free tier: 100/month. Leave blank to skip Layer 3. |
 | `USE_SFTP` | Enrichment pipeline | `true` = SFTP mode, `false` = local files |
 | `INPUT_FILE` | Local mode | CSV to read (default: `QueryResults_837.csv`) |
 | `OUTPUT_FILE` | Local mode | CSV to write (default: `QueryResults_837_Enriched.csv`) |
 | `SFTP_HOST/USER/PASSWORD` | SFTP mode | File server credentials |
 | `ENABLE_PRODUCT_CHECK` | Enrichment pipeline | `true` = call `/api/check` per URL |
-| `ENRICHMENT_TTL_DAYS` | Enrichment pipeline + ttl-check API | Skip rows enriched within N days (default 30) |
 
 ---
 

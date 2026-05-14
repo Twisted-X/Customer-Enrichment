@@ -1,7 +1,6 @@
 """
 Tests for checker/_types.py — result factory functions.
 """
-import pytest
 from datetime import datetime
 from checker._types import empty_scan, empty_search, new_check_result
 

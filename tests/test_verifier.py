@@ -1,20 +1,11 @@
 """
 Tests for verifier.py — confidence scoring and product verification.
 """
-import pytest
 from verifier import (
     calculate_confidence,
     add_confidence_scores,
     verify_product_against_block,
     verify_products_against_blocks,
-    _HIGH_THRESHOLD,
-    _MEDIUM_THRESHOLD,
-    _W_BRAND_EXACT,
-    _W_HAS_SKU,
-    _W_HAS_PRICE,
-    _W_HAS_URL,
-    _W_HAS_NAME_SNIPPET,
-    _W_HAS_PRICE_SNIPPET,
 )
 
 

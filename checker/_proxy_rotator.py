@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 from threading import Lock
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Union
 from urllib.parse import urlparse
 
 ProxyType = Union[str, Dict[str, str]]

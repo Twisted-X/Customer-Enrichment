@@ -15,7 +15,6 @@ import json
 import logging
 import os
 from contextlib import contextmanager
-from datetime import date
 
 import pandas as pd
 
@@ -24,8 +23,7 @@ from ._config import (
     SFTP_HOST, SFTP_PORT, SFTP_USER,
     SFTP_KEY_PATH, SFTP_PASSWORD,
     SFTP_INBOUND_DIR, SFTP_REVIEW_DIR, SFTP_ARCHIVE_DIR,
-    COLUMN_MAP, NETSUITE_ID_COL, URL_COL, ADDRESS_COLS,
-    NETSUITE_LAST_ENRICHED_COL, ENRICHMENT_TTL_DAYS,
+    COLUMN_MAP, NETSUITE_ID_COL, URL_COL, NETSUITE_LAST_ENRICHED_COL, ENRICHMENT_TTL_DAYS,
 )
 
 log = logging.getLogger(__name__)

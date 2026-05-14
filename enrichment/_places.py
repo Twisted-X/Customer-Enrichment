@@ -26,7 +26,6 @@ from ._config import (
     GOOGLE_PLACES_API_KEY,
     PLACES_URL, FIELD_MASK,
     PLACES_REQUEST_TIMEOUT,
-    WEBSITE_NOT_FOUND_LABEL,
 )
 
 log = logging.getLogger(__name__)

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import List, Optional
+from typing import List
 from urllib.parse import urlparse as _urlparse
 
 from config import HEADLESS, TX_STYLE_CODES

@@ -2,7 +2,6 @@
 Tests for enrichment/_company.py — company key normalisation and branch matching.
 """
 import math
-import pytest
 import pandas as pd
 
 from enrichment._company import (

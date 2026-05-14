@@ -12,7 +12,6 @@ import logging
 import requests
 
 from ._config import (
-    ENABLE_PRODUCT_CHECK,
     CHECK_API_URL, CHECK_API_TIMEOUT,
     URL_BLACKLIST, URL_COL,
 )
@@ -40,8 +39,10 @@ def check_product_signals(url: str) -> dict:
         return known
 
     def _b(val) -> str:
-        if val is True:  return "yes"
-        if val is False: return "no"
+        if val is True:
+            return "yes"
+        if val is False:
+            return "no"
         return "unknown"
 
     try:

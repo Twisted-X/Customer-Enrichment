@@ -27,8 +27,8 @@ def _body_text(page: Page, timeout: int = 10_000) -> str:
         except Exception:
             return ''
 
-from ._constants import _POPUP_CLOSE_SELECTORS, _SEARCH_INPUT_SELECTORS, _SEARCH_ICON_SELECTORS
-from ._brand import _check_brand_in_content, _is_netsuite_site
+from ._constants import _POPUP_CLOSE_SELECTORS, _SEARCH_INPUT_SELECTORS, _SEARCH_ICON_SELECTORS  # noqa: E402
+from ._brand import _check_brand_in_content, _is_netsuite_site  # noqa: E402
 
 log = logging.getLogger(__name__)
 
