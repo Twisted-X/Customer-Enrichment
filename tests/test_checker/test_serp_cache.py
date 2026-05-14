@@ -8,7 +8,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from checker._serp import serp_check, _cache, _cache_lock, _CACHE_TTL_S
+from checker._serp import serp_check, _cache, _cache_lock
 
 
 def _make_response(items):
