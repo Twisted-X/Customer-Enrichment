@@ -31,7 +31,7 @@
 
 ## 1. What This System Does
 
-Twisted X Global Brands maintains approximately 1,800 retail accounts in NetSuite. This system answers two business questions automatically:
+Twisted X Global Brands maintains approximately 1,800+ retail accounts in NetSuite. This system answers two business questions automatically:
 
 **Question 1 (Retailer Detection):** Does this retailer's website actually sell Twisted X products online?
 - Input: a retailer URL (e.g. `https://www.bootbarn.com`)
@@ -41,7 +41,7 @@ Twisted X Global Brands maintains approximately 1,800 retail accounts in NetSuit
 - Input: NetSuite CSV export of customer records
 - Output: Enriched CSV with verified URL, Google Places data, address match confidence, NetSuite `online_sales_status` dropdown value
 
-Results from both flows feed back into NetSuite via Celigo (a cloud iPaaS the IT team already operates).
+Results from both flows feed back into NetSuite via Celigo.
 
 ---
 
@@ -50,18 +50,16 @@ Results from both flows feed back into NetSuite via Celigo (a cloud iPaaS the IT
 ```
 +------------------------------------------------------------------+
 |                       Celigo Cloud Platform                       |
-|                                                                    |
+|                                                                   |
 |   Flow A — Retailer Detection (scheduled):                        |
 |     1. Pull retailer URLs from NetSuite                           |
 |     2. POST /api/check   -> yes/no + SKUs                         |
-|     3. POST /api/scrape  -> raw DOM product blocks                 |
-|     4. LLM extraction via Anthropic connector (Claude)             |
-|     5. POST /api/verify  -> anti-hallucination check              |
-|     6. Write verified products back to NetSuite                    |
-|                                                                    |
+|     3. Write verified products back to NetSuite                   |
+|                                                                   |
+|                                                                   |
 |   Flow B — Customer Enrichment (scheduled):                       |
 |     1. Pull customer records from NetSuite                        |
-|     2. Celigo date/source filter -> skip fresh records            |
+|     2. Celigo native mapping -> skip fresh records                |
 |     3. POST /api/enrich/url-ping  -> flag dead/missing URLs       |
 |     4. POST /api/enrich/batch     -> enrich stale records         |
 |     5. POST /api/enrich/classify-retail -> retail type            |
@@ -72,17 +70,20 @@ Results from both flows feed back into NetSuite via Celigo (a cloud iPaaS the IT
                               | Celigo Gateway (secure tunnel)
                               v
 +------------------------------------------------------------------+
-|              Scraper API  --  api_server.py  (FastAPI)            |
-|                                                                    |
-|   POST /api/check              ->  checker/  package              |
-|   POST /api/scrape             ->  cleaning.py                    |
-|   POST /api/verify             ->  verifier.py                    |
-|                                                                    |
-|   POST /api/enrich             ->  enrichment._enrich_single      |
-|   POST /api/enrich/batch       ->  enrichment._enrich_single (N)  |
-|   POST /api/enrich/url-ping    ->  enrichment._url.bulk_check_urls|
+|              Scraper API  --  api_server.py  (FastAPI)               |
+|                                                                      |
+|   POST /api/check              ->  checker/  package                 |
+|   POST /api/scrape             ->  cleaning.py                       |
+|   POST /api/verify             ->  verifier.py                       |
+|                                                                      |
+|   POST /api/enrich             ->  enrichment._enrich_single         |
+|   POST /api/enrich/batch       ->  enrichment._enrich_single (N)     |
+|   POST /api/enrich/pipeline    ->  enrichment.run_pipeline()         |
+|   POST /api/enrich/ttl-check   ->  enrichment._io.should_enrich      |
+|   POST /api/enrich/url-ping    ->  enrichment._url.bulk_check_urls   |
+|   POST /api/enrich/online-status -> enrichment._product              |
 |   POST /api/enrich/address-validate -> enrichment._address_validation|
-|   POST /api/enrich/classify-retail -> enrichment._retail          |
+|   POST /api/enrich/classify-retail -> enrichment._retail             |
 +-----------------------------+------------------------------------+
                               |
                   +-----------+-------------+
@@ -116,8 +117,8 @@ fallback CLI script (url_enrichment_pipeline.py / POST /api/enrich/pipeline):
 
 | Layer | File(s) | What it does |
 |-------|---------|-------------|
-| API server | `api_server.py` | FastAPI app — retailer detection + scrape/verify + 5 enrichment endpoints |
-| Retailer detection | `checker/` | 4-layer check: HTTP → sitemap → SerpApi Google Search → Playwright browser |
+| API server | `api_server.py` | FastAPI app — retailer detection + scrape/verify + 8 enrichment endpoints |
+| Retailer detection | `checker/` | 3-layer check: HTTP → sitemap → Playwright browser |
 | DOM extraction | `cleaning.py` | Strips noise from rendered pages, returns product card blocks |
 | Anti-hallucination | `verifier.py` | Cross-checks LLM output against raw DOM blocks |
 | URL validation | `url_validator/` | Playwright deep-dive: sells TX? sells online? sells footwear? |
@@ -151,20 +152,21 @@ curl -X POST http://localhost:8000/api/check \
   -d '{"url": "https://www.atwoods.com/"}'
 
 # Enrichment endpoints require the API key header:
-curl -X POST http://localhost:8000/api/enrich \
+curl -X POST http://localhost:8000/api/enrich/ttl-check \
   -H 'X-API-Key: your_enrich_api_key' \
   -H 'Content-Type: application/json' \
-  -d '{"company": "Boot Barn", "address": "123 Main St", "city": "Scottsdale", "state": "AZ", "zip_code": "85260"}'
+  -d '[{"internal_id": "NS-1", "last_enrichment_date": null}]'
 ```
 
 ### What you need in `.env` for each flow
 
 | Flow | Required variables |
 |------|--------------------|
-| Retailer detection (`/api/check`, `/api/scrape`, `/api/verify`) | None mandatory — server starts without any keys. Set `SERPAPI_KEY` to enable Layer 3. |
+| Retailer detection (`/api/check`, `/api/scrape`, `/api/verify`) | None mandatory — server starts without any keys |
 | Enrichment API (`/api/enrich/*`) | `GOOGLE_PLACES_API_KEY`, `ENRICH_API_KEY` |
-| Fallback CLI pipeline (`url_enrichment_pipeline.py`) | `GOOGLE_PLACES_API_KEY`, `INPUT_FILE`, `OUTPUT_FILE` |
+| Fallback CLI pipeline (`url_enrichment_pipeline.py` / `POST /api/enrich/pipeline`) | `GOOGLE_PLACES_API_KEY`, `INPUT_FILE`, `OUTPUT_FILE` |
 | SFTP mode (`USE_SFTP=true`) | All `SFTP_*` variables |
+| URL recovery (`suggest_urls_for_bad_rows.py`) | `GOOGLE_CSE_API_KEY` + `GOOGLE_CSE_CX` (optional; falls back to DuckDuckGo without them) |
 
 ---
 
@@ -325,28 +327,54 @@ Enrich up to 100 records in one call. Records are processed **concurrently** via
 
 ```
 Request:  [ EnrichRequest, EnrichRequest, ... ]   // max 100 items
-Headers:  X-Idempotency-Key: <uuid>               // optional — safe retries
 Response: {
   "results": [
     { "internal_id": "NS-12345", "result": { ...EnrichResponse... } },
     ...
   ],
-  "total":            20,
-  "duration_sec":     3.42,
-  "google_api_calls": 47,
-  "quota_errors":     0
+  "total":        20,
+  "duration_sec": 3.42
 }
 ```
 
 Results are returned in the **same order** as the request. Each item echoes `internal_id` so
 Celigo can match without relying on array position. Exceeding 100 items → HTTP 422.
 
-**Idempotency:** pass `X-Idempotency-Key: <uuid>` to make Celigo retries safe. The server caches
-the full response for 30 minutes — a retry with the same key returns the cached result without
-re-calling Google APIs.
+---
 
-**Quota visibility:** `google_api_calls` is the total Google API calls made across all records
-(0-3 per record). `quota_errors` counts records where enrichment failed due to quota limits.
+**`POST /api/enrich/pipeline`** _(requires `X-API-Key`)_
+Trigger the full CSV batch pipeline (`url_enrichment_pipeline.py`). Long-running — set a
+generous HTTP timeout (use `READ_TIMEOUT` ≥ 1 hour for large files).
+
+```
+Request:  (no body)
+Response: {
+  "status":       "completed",
+  "message":      "Pipeline finished in 382.1s",
+  "started_at":   "2026-05-11T14:00:00+00:00",
+  "completed_at": "2026-05-11T14:06:22+00:00",
+  "duration_sec": 382.1
+}
+```
+
+Input/output controlled by `INPUT_FILE` / `OUTPUT_FILE` env vars (or SFTP when `USE_SFTP=true`).
+
+---
+
+**`POST /api/enrich/ttl-check`** _(requires `X-API-Key`)_
+Check which records are stale and need re-enrichment. Pure date logic — no Google API calls.
+
+```
+Request:  [
+  { "internal_id": "NS-1", "last_enrichment_date": "2026-04-01", "enrichment_source": "text_search" },
+  { "internal_id": "NS-2", "last_enrichment_date": null },
+  { "internal_id": "NS-3", "last_enrichment_date": "2026-05-10", "enrichment_source": "enrichment_error" }
+]
+Response: { "fresh": ["..."], "stale": ["NS-1", "NS-2", "NS-3"], "ttl_days": 30 }
+```
+
+A record is **stale** when: date is null/blank, older than `ENRICHMENT_TTL_DAYS`, or previous
+`enrichment_source` was `enrichment_error` / `address_mismatch` (always re-enriched regardless of age).
 
 ---
 
@@ -393,6 +421,24 @@ Diagnostic interpretation: `geocoded=false` → address too vague; `geocoded=tru
 
 ---
 
+**`POST /api/enrich/online-status`** _(requires `X-API-Key`)_
+Compute the NetSuite `online_sales_status` dropdown value from enrichment + product-check signals.
+Pure logic — no API calls.
+
+> **Note:** The Celigo flow does **not** call this endpoint — Celigo handles the NetSuite field
+> mapping natively. This endpoint exists for debugging, standalone scripts, or non-Celigo callers.
+
+```
+Request:  { "found_url": "https://www.bootbarn.com", "sells_twisted_x": "yes", "sells_anything": "yes", "sells_shoes": "yes" }
+Response: { "online_sales_status": "Ecommerce Site : Sells Twisted X" }
+```
+
+Priority: no URL → `"No Website"` | TX=yes → `"Ecommerce Site : Sells Twisted X"` |
+anything+shoes=yes → `"Ecommerce Site : Opportunity"` | anything=yes,shoes=no →
+`"Ecommerce Site : Does Not Sell Twisted X"` | anything=no → `"No Ecommerce"` | blank → `""`.
+
+---
+
 **`POST /api/enrich/classify-retail`** _(requires `X-API-Key`)_
 Classify a business as `retail` / `not_retail` / `unknown`. Pure logic — no API calls.
 
@@ -424,10 +470,12 @@ Retailer detection models:
 
 Enrichment models:
 - `EnrichRequest` / `EnrichResponse` — for `/api/enrich` (single record); `EnrichRequest` is
-  also the element type for `/api/enrich/batch`. `EnrichResponse` includes `google_api_calls` (0-3).
+  also the element type for `/api/enrich/batch`
+- `EnrichPipelineResponse` — for `/api/enrich/pipeline` (status, timestamps, duration)
+- `TtlCheckItem` / `TtlCheckResponse` — for `/api/enrich/ttl-check`
 - `UrlPingItem` / `UrlPingDetail` / `UrlPingResponse` — for `/api/enrich/url-ping`
-- `BatchEnrichItem` / `BatchEnrichResponse` — for `/api/enrich/batch`.
-  `BatchEnrichResponse` includes `google_api_calls` (total across batch) and `quota_errors` (count).
+- `BatchEnrichItem` / `BatchEnrichResponse` — for `/api/enrich/batch`
+- `OnlineStatusRequest` / `OnlineStatusResponse` — for `/api/enrich/online-status`
 - `AddressValidateRequest` / `AddressValidateResponse` — for `/api/enrich/address-validate`
 - `ClassifyRetailRequest` / `ClassifyRetailResponse` — for `/api/enrich/classify-retail`
 
@@ -471,7 +519,7 @@ The core detection engine. Called by `api_server.py` for every `/api/check` requ
 
 **Entry point:** `from checker import run_check; result = run_check(url)`
 
-#### Detection strategy — four layers in order
+#### Detection strategy — three layers in order
 
 ```
 URL
@@ -479,27 +527,17 @@ URL
  +-> Layer 1: HTTP-first (_http.py)
  |     Plain HTTP GET, Chrome user-agent.
  |     Scans response HTML for TX SKU codes.
- |     sells_online derived from whether found products have a price or product URL.
  |     If SKU found -> definitive YES, stop here.
  |     Cost: ~1 HTTP request, no browser.
  |
  +-> Layer 2: Sitemap (_sitemap.py)
  |     Fetches robots.txt -> follows Sitemap: directives.
  |     Falls back to /sitemap.xml -> /sitemap_index.xml.
- |     Prioritises product/brand/category child sitemaps; skips blog/news/video.
- |     Scans all <loc> URLs for TX slugs (twisted-x, twistedx, tx-boots, tx-footwear...).
- |     No URL count cap — scans everything in fetched sitemaps (string matching is free).
+ |     Scans all <loc> URLs for "twisted-x" or "twistedx" slugs.
  |     If TX slug found -> definitive YES, stop here.
- |     Cost: 2-10 HTTP requests, no browser.
+ |     Cost: 2-5 HTTP requests, no browser.
  |
- +-> Layer 3: SerpApi (_serp.py)
- |     Searches Google for "Twisted X site:<domain>" via SerpApi JSON API.
- |     Bypasses Cloudflare / PerimeterX — Google has already indexed the retailer.
- |     No results is NOT definitive NO (small sites may not be indexed).
- |     If Google results found -> definitive YES, stop here.
- |     Cost: 1 SerpApi call, no browser.
- |
- +-> Layer 4: Playwright (_playwright.py)
+ +-> Layer 3: Playwright (_playwright.py)
        Launches real Chromium browser.
        Detects platform (Shopify / WooCommerce / NetSuite / generic).
        Runs platform-appropriate search strategy.
@@ -507,14 +545,14 @@ URL
        Cost: 15-60 seconds, full browser.
 ```
 
-Layers 1-3 are cheap. Layer 4 is expensive. The design short-circuits so Playwright only
-runs when all three cheap layers are inconclusive.
+Layer 1 and 2 are cheap. Layer 3 is expensive. The design short-circuits so Layer 3 only
+runs when the cheap layers are inconclusive.
 
 #### Module-by-module reference
 
 **`checker/__init__.py`**
-Wires the four layers together in `run_check(url)`. Handles URL normalisation, merges
-sitemap/SerpApi context notes into Layer 4 results when Layer 4 found nothing on its own.
+Wires the three layers together in `run_check(url)`. Handles URL normalisation, merges
+sitemap context into Layer 3 results when Layer 3 found nothing on its own.
 
 ---
 
@@ -549,7 +587,7 @@ The two core detection primitives used by all three layers.
 - Takes a live Playwright Page
 - Calls `scan_html_for_skus` on the rendered page content
 - Also extracts sample product data (name, price, image, URL) from matching elements
-- Used by Layer 4 (Playwright)
+- Used by Layer 3 (Playwright)
 
 `find_brand_in_product_context(page) -> str | None`
 - Runs JavaScript inside the browser to scan product link/card text for brand names
@@ -610,32 +648,15 @@ Layer 2 implementation.
 `sitemap_check(url) -> LayerResult`
 - Fetches `robots.txt` and extracts `Sitemap:` directive URLs
 - Falls back to `/sitemap.xml` and `/sitemap_index.xml`
-- Handles gzipped sitemaps — detects via filename `.xml.gz` **and** `Content-Encoding: gzip` header
-- Prioritises child sitemaps with `product/brand/categor/collection/catalog` in the name
-- Skips child sitemaps with `blog/news/post/video/media` in the name (never contain TX products)
-- Fetches up to 10 child sitemaps (in priority order); no URL count cap — scanning is free
-- Scans all `<loc>` URLs with regex covering `twisted-x`, `twistedx`, `tx-boots`, `tx-footwear`, `tx-work`, `tx-western` etc.
-- `sells_online` derived from whether the found URL contains product/shop/brand path segments
-- A URL slug like `/brands/twisted-x/` is a definitive positive
+- Handles gzipped sitemaps (`.xml.gz`) and sitemap index files
+- Scans all `<loc>` URLs with regex `twisted[_-]?x|twistedx`
+- A URL slug like `/twisted-x-boots/MCA0070` is a definitive positive
 - Absence is NOT treated as a negative (products may simply not be in the sitemap)
 
 ---
 
-**`checker/_serp.py`**
-Layer 3 implementation. Requires `SERPAPI_KEY` in `.env`.
-
-`serp_check(url) -> dict`
-- Searches Google for `"Twisted X site:<domain>"` via SerpApi JSON API
-- Returns `definitive=True` only when Google results are found
-- No results is NOT a definitive NO — falls through to Playwright
-- Gracefully disabled (returns `definitive=False`) when `SERPAPI_KEY` is blank
-- Key advantage: Google has already crawled bot-protected sites (Boot Barn, Cavenders) — Layer 3
-  catches these without needing a browser or residential proxy
-
----
-
 **`checker/_playwright.py`**
-Layer 4 implementation. The only module in the package that opens a browser.
+Layer 3 implementation. The only module in the package that opens a browser.
 
 `playwright_check(url, normalized, retailer_name) -> dict`
 
@@ -1139,8 +1160,7 @@ Celigo scheduler triggers (e.g. nightly)
   |   |   +- checker.run_check()
   |   |       +- Layer 1: HTTP GET -> scan for TX SKUs -> definitive? stop
   |   |       +- Layer 2: sitemap scan -> TX slug? stop
-  |   |       +- Layer 3: SerpApi -> Google Search -> definitive? stop
-  |   |       +- Layer 4: Playwright -> platform detect -> search -> scan
+  |   |       +- Layer 3: Playwright -> platform detect -> search -> scan
   |   |   -> {sells_twisted_x: true, confidence: "high", sample_products: [...]}
   |   |
   |   +- POST /api/scrape {"url": "...", "search_term": "Twisted X"}
@@ -1176,10 +1196,10 @@ Celigo scheduler triggers (e.g. nightly)
   |   Fields: internal_id, company, address, city, state, zip_code,
   |           website_url, last_enrichment_date, enrichment_source
   |
-  +- Celigo native filter (no API call)
-  |   Skip records where last_enrichment_date is within TTL days
-  |   AND enrichment_source is not "text_search" or "enrichment_error"
-  |   (last_enrichment_date and enrichment_source stored in NetSuite)
+  +- POST /api/enrich/ttl-check
+  |   [{internal_id, last_enrichment_date, enrichment_source}, ...]
+  |   -> {fresh: [...], stale: [...], ttl_days: 30}
+  |   Celigo skips the "fresh" IDs for this run
   |
   +- POST /api/enrich/url-ping  (stale records only)
   |   [{internal_id, url}, ...]
@@ -1248,7 +1268,8 @@ All configuration via environment variables. Copy `.env.example` -> `.env` and f
 |----------|-------------|---------|-------------|
 | `GOOGLE_PLACES_API_KEY` | Enrichment pipeline + all `/api/enrich/*` | — | Google Places + Address Validation API key |
 | `ENRICH_API_KEY` | All `/api/enrich/*` endpoints | — | Shared secret; pass as `X-API-Key` header. Server refuses to start if unset. |
-| `SERPAPI_KEY` | Layer 3 retailer detection | — | SerpApi Google Search key — bypasses bot protection. Free tier: 100/month. Leave blank to skip Layer 3. |
+| `GOOGLE_CSE_API_KEY` | URL recovery | — | Google Custom Search Engine API key |
+| `GOOGLE_CSE_CX` | URL recovery | — | Custom Search Engine ID |
 | `USE_SFTP` | Enrichment pipeline | `false` | `true` = SFTP mode (Celigo automated flow) |
 | `INPUT_FILE` | Enrichment pipeline | `QueryResults_837.csv` | Local input CSV (ignored when USE_SFTP=true) |
 | `OUTPUT_FILE` | Enrichment pipeline | `QueryResults_837_Enriched.csv` | Local output CSV |
@@ -1261,7 +1282,7 @@ All configuration via environment variables. Copy `.env.example` -> `.env` and f
 | `SFTP_REVIEW_DIR` | SFTP mode | `/review` | Dir to upload enriched output |
 | `SFTP_ARCHIVE_DIR` | SFTP mode | `/archive` | Dir to move processed input |
 | `ENABLE_PRODUCT_CHECK` | Enrichment pipeline | `false` | Call `/api/check` per URL |
-| `ENRICHMENT_TTL_DAYS` | Enrichment pipeline | `30` | Skip re-enrichment within this many days (Celigo handles this filter natively) |
+| `ENRICHMENT_TTL_DAYS` | Enrichment pipeline + `/api/enrich/ttl-check` | `30` | Skip re-enrichment within this many days |
 | `SKU_XLSX_FILENAME` | API server | `twisted_x_skus_v107.xlsx` | Override SKU database filename |
 | `SKU_CSV_FILENAME` | API server | `twisted_x_sku.csv` | Override fallback SKU CSV |
 | `MIN_EXPECTED_STYLE_CODES` | API server | `1000` | Server refuses to start if fewer codes loaded |
@@ -1338,37 +1359,11 @@ per company.
 
 | Issue | Impact | Status |
 |-------|--------|--------|
-| Cloudflare / PerimeterX blocks major retailers | Layer 3 (SerpApi) catches these via Google index — Playwright only needed for unindexed/unknown sites | Largely mitigated by SerpApi Layer 3 |
+| Cloudflare / PerimeterX blocks major retailers (Boot Barn, Cavenders) | Cannot scrape these with standard Playwright | Workaround: use residential proxy or manual check |
 | No pytest for Playwright layers | Browser-dependent layers need integration harness | Planned — pure-Python layers have 265 unit tests |
 | `suggest_urls_for_bad_rows.py` is 870 lines | Hard to maintain | Low priority — runs rarely |
 | Sync Playwright (blocking) | One scrape blocks the API worker | Acceptable at current volume |
 | Product classification (gender/type) not in Python API | Classification runs in Celigo after `/api/verify` | Deliberate — see design decision above |
-
-### Completed Improvements (2026-05-14)
-
-**checker/ — 4-layer detection**
-- **Layer 3 (SerpApi)** added: `checker/_serp.py` — searches Google for `"Twisted X site:<domain>"` via SerpApi JSON API. Catches bot-protected retailers (Boot Barn, Cavenders) that Playwright would struggle with. Gracefully disabled when `SERPAPI_KEY` is blank. `sells_online` derived from ecommerce path signals in result URLs (`/product`, `/shop`, `/cart`, `/collections`, etc.) — not hardcoded.
-- **Layer 1 fix**: `sells_online` and `store_type` are now derived from whether found products have a price or `product_url`, rather than hardcoded `True`/`"ecommerce"`.
-- **Layer 2 improvements**:
-  - TX regex expanded to also catch `tx-boots`, `tx-footwear`, `tx-work`, `tx-western` URL slugs
-  - Child sitemaps prioritised — `product/brand/categor/collection/catalog` fetched first; `blog/news/video/media` skipped entirely
-  - URL scan cap removed (string matching is free; HTTP fetches are the bottleneck)
-  - Child sitemap fetch limit raised 3 → 10 (ordered by relevance, so the right ones come first)
-  - Gzip detection now checks `Content-Encoding: gzip` header in addition to `.gz` filename suffix
-  - `sells_online` derived from found page URL path segments, not hardcoded
-
-**api_server.py**
-- `X-Idempotency-Key` header support on `/api/enrich/batch` — 30-minute server-side cache prevents re-burning Google quota on Celigo retries
-- `asyncio.Semaphore(3)` added to `/api/check` — caps concurrent Playwright browsers to prevent OOM
-- `google_api_calls` and `quota_errors` fields added to `BatchEnrichResponse` for quota visibility
-- Removed `POST /api/enrich/ttl-check` — staleness logic moved to Celigo natively (requires `last_enrichment_date` and `enrichment_source` stored in NetSuite)
-- Removed `POST /api/enrich/online-status` — NetSuite field mapping handled by Celigo natively
-
-**enrichment/_enrich_single.py**
-- `google_api_calls` counter added — tracks 0-3 calls per record and surfaces in `EnrichResponse`
-
-**config.py**
-- `SERPAPI_KEY` env var added
 
 ### Completed Refactors (2026-05-11) — Enrichment API
 
@@ -1417,5 +1412,4 @@ per company.
 
 - Automated pytest suite for `checker/` detection logic
 - MAP price compliance checking (blocked on this cleanup landing first)
-- DuckDB integration for local product image matching
 - Async Playwright for higher API throughput
