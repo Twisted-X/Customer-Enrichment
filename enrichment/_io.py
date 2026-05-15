@@ -91,8 +91,15 @@ def load_dataframe(path: str) -> tuple:
 
     Returns (df, is_csv).
     """
-    is_csv = path.lower().endswith(".csv")
-    df     = pd.read_csv(path, dtype=str) if is_csv else pd.read_excel(path, dtype=str)
+    is_csv  = path.lower().endswith(".csv")
+    is_json = path.lower().endswith(".json")
+    if is_json:
+        df = pd.read_json(path, dtype=str)
+        df = df.astype(str)
+    elif is_csv:
+        df = pd.read_csv(path, dtype=str)
+    else:
+        df = pd.read_excel(path, dtype=str)
     log.info("Loaded %d records from %s", len(df), path)
 
     # Rename Celigo / export column labels to pipeline-internal names
@@ -124,15 +131,20 @@ def load_dataframe(path: str) -> tuple:
             .replace("", pd.NA)
         )
 
-    return df, is_csv
+    return df, is_json or is_csv  # treat JSON same as CSV for output routing
 
 
 def save_output(df: pd.DataFrame, output_path: str, is_csv: bool) -> str:
     """
-    Save the enriched DataFrame to CSV (or Excel) and a companion JSON file.
+    Save the enriched DataFrame to CSV/JSON/Excel and a companion JSON file.
     Returns the JSON output path.
     """
-    if is_csv:
+    is_json_out = output_path.lower().endswith(".json")
+    if is_json_out:
+        records = df.where(df.notna(), other=None).to_dict(orient="records")
+        with open(output_path, "w", encoding="utf-8") as fh:
+            json.dump(records, fh, indent=2, ensure_ascii=False, default=str)
+    elif is_csv:
         df.to_csv(output_path, index=False)
     else:
         df.to_excel(output_path, index=False)

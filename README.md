@@ -5,9 +5,9 @@ enrichment system. Two main flows:
 
 1. **Retailer Detection API** — FastAPI service that Celigo calls to determine
    whether a retailer website sells Twisted X products online.
-2. **Customer Enrichment Pipeline** — CLI that reads a NetSuite customer CSV,
-   looks up each retailer on Google Places, pings their URLs, and writes back
-   verified contact data and a `online_sales_status` value ready for NetSuite.
+2. **Customer Enrichment Pipeline** — CLI that reads a NetSuite customer CSV, Excel, or JSON
+   file, looks up each retailer on Google Places, pings their URLs, and writes back
+   verified contact data and an `online_sales_status` value ready for NetSuite.
 
 For full detail on every file, data flow, and design decision, see
 [`ARCHITECTURE.md`](ARCHITECTURE.md).
@@ -130,12 +130,29 @@ python3 -m venv venv && source venv/bin/activate
 
 # Install all dependencies
 pip install -r requirements.txt
+
+# Install Playwright and Patchright browsers
 playwright install chromium
+patchright install chromium
 
 # Configure secrets
 cp .env.example .env
-# Edit .env -- fill in GOOGLE_PLACES_API_KEY, ENRICH_API_KEY, SERPAPI_KEY
+# Edit .env — fill in GOOGLE_PLACES_API_KEY, ENRICH_API_KEY, SERPAPI_KEY
 ```
+
+**Key dependencies:**
+
+| Package | Purpose |
+|---------|---------|
+| `patchright` | Stealth browser (anti-bot detection) — Layer 4 |
+| `playwright` | Browser automation base |
+| `curl_cffi` | HTTP client with TLS fingerprint spoofing — Layers 1 & 2 |
+| `serpapi` / `requests` | SerpApi Google Search — Layer 3 |
+| `fastapi` + `uvicorn` | REST API server |
+| `pandas` + `openpyxl` | CSV / Excel / JSON input-output |
+| `paramiko` | SFTP for automated Celigo pipeline |
+| `httpx` | Required by FastAPI `TestClient` |
+| `typing_extensions` | Backported type hints (`TypedDict`) |
 
 ---
 
