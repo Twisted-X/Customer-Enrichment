@@ -99,8 +99,8 @@ def _collect_candidates(base_url: str) -> list:
                     sm_url = line.split(":", 1)[1].strip()
                     if sm_url:
                         candidates.append(sm_url)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("robots.txt fetch failed for %s: %s", base_url, exc)
 
     for default in [f"{base_url}/sitemap.xml", f"{base_url}/sitemap_index.xml"]:
         if default not in candidates:
@@ -131,8 +131,8 @@ def _process_candidate(candidate: str, n_checked: int, any_fetched: bool):
         if hit:
             return hit, n_checked, any_fetched
 
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("Sitemap candidate processing failed for %s: %s", candidate, exc)
 
     return None, n_checked, any_fetched
 
@@ -170,7 +170,8 @@ def _scan_children(child_locs: list, n_checked: int):
                 n_checked += 1
                 if _TX_RE.search(loc):
                     return _tx_found(loc), n_checked
-        except Exception:
+        except Exception as exc:
+            log.debug("Child sitemap fetch failed for %s: %s", child_url, exc)
             continue
 
     return None, n_checked
@@ -191,7 +192,8 @@ def _parse_sitemap(content: bytes, is_gz: bool) -> tuple:
     try:
         raw = gzip.decompress(content) if is_gz else content
         root = ET.fromstring(raw)
-    except Exception:
+    except Exception as exc:
+        log.debug("Sitemap XML parse failed: %s", exc)
         return ([], [])
 
     NS = "http://www.sitemaps.org/schemas/sitemap/0.9"

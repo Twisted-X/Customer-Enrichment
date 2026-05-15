@@ -9,6 +9,7 @@ _check_product_links(page)                 -> bool
 _is_netsuite_site(page)                    -> bool
 _classify_brand_site(final_url, text, url) -> (bool, bool)
 """
+import logging
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -16,6 +17,8 @@ from patchright.sync_api import Page
 from brand_config import ALL_INDICATORS as _BRAND_INDICATORS
 
 from ._constants import _GENERIC_BRAND_WORDS, _PRODUCT_TITLE_SELECTORS
+
+log = logging.getLogger(__name__)
 
 
 def normalize_url(url: str) -> Optional[str]:
@@ -90,11 +93,13 @@ def _check_product_links(page: Page) -> bool:
                         'el => (el.closest("div, article, section") || el).innerText || ""'
                     ).lower()
                     combined = text + ' ' + parent_text + ' ' + href.lower()
-                except Exception:
+                except Exception as exc:
+                    log.debug("Parent context read failed: %s", exc)
                     combined = text + ' ' + href.lower()
                 if _check_brand_in_content(combined):
                     return True
-            except Exception:
+            except Exception as exc:
+                log.debug("Product link scan element failed: %s", exc)
                 continue
 
         for selector in _PRODUCT_TITLE_SELECTORS:
@@ -102,10 +107,11 @@ def _check_product_links(page: Page) -> bool:
                 try:
                     if _check_brand_in_content((el.inner_text() or '').lower()):
                         return True
-                except Exception:
+                except Exception as exc:
+                    log.debug("Product title element read failed: %s", exc)
                     continue
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("_check_product_links failed: %s", exc)
     return False
 
 

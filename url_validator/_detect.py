@@ -103,7 +103,8 @@ def detect_footwear(page: Page, base_url: str) -> Dict:
                 if has_add_to_cart or has_product_grid or has_product_links:
                     result.update(sells_footwear=True, confidence='high', method=f'category_{path}')
                     return result
-            except Exception:
+            except Exception as exc:
+                log.debug("Category page check failed for %s: %s", path, exc)
                 continue
 
         # Step 3: Search fallback
@@ -184,8 +185,8 @@ def detect_twisted_x(page: Page, url: str, return_page_info: bool = False) -> Di
                         for _ in range(3):
                             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                             page.wait_for_timeout(1500)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        log.debug("Search result scroll failed: %s", exc)
 
                     results_text = _body_text(page)
                     results_html = page.content().lower()
@@ -203,8 +204,8 @@ def detect_twisted_x(page: Page, url: str, return_page_info: bool = False) -> Di
                                 alt = (img.get_attribute('alt') or '').lower()
                                 if _check_brand_in_content(alt):
                                     return _found('image_alt_text')
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            log.debug("Image alt-text scan failed: %s", exc)
 
             # Only reload the homepage if we actually navigated away, so we
             # start the next search term from a clean state without an extra
@@ -213,8 +214,8 @@ def detect_twisted_x(page: Page, url: str, return_page_info: bool = False) -> Di
                 try:
                     _goto_safe(page, url, timeout=10_000)
                     page.wait_for_timeout(500)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.debug("Homepage reload failed between search terms (%s): %s", url, exc)
 
         if _try_category_pages(page, url):
             return _found('category_page')

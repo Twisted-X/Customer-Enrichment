@@ -107,7 +107,8 @@ def _scroll_to_load(page, rounds: int = 3) -> None:
         try:
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             page.wait_for_timeout(800)
-        except Exception:
+        except Exception as exc:
+            log.debug("Scroll to load failed: %s", exc)
             break
 
 
@@ -118,7 +119,8 @@ def _page_has_content(page) -> bool:
         if len(text) < 200:
             return False
         return not any(phrase in text for phrase in _NO_RESULTS_PHRASES)
-    except Exception:
+    except Exception as exc:
+        log.debug("_page_has_content body read failed: %s", exc)
         return False
 
 
@@ -209,8 +211,8 @@ def _search_urls_for_platform(page, platform: str, base_url: str) -> List[str]:
                     f"{detected}?type=product&q=Twisted+X",
                     f"{detected}?q=Twisted+X",
                 ]
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("Shopify search URL detection failed: %s", exc)
         return [
             f"{base_url}/search?type=product&q=Twisted+X",
             f"{base_url}/search?q=Twisted+X",

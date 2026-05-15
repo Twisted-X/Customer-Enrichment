@@ -5,7 +5,10 @@ transparently; Paramiko's auth_password alone may fail).
 """
 from __future__ import annotations
 
+import logging
 import socket
+
+log = logging.getLogger(__name__)
 
 
 def _load_private_key(path: str):
@@ -81,5 +84,5 @@ def close_sftp(sftp) -> None:
         sftp.close()
         if tr is not None:
             tr.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("SFTP close error (connection may already be dropped): %s", exc)

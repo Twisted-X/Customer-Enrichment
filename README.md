@@ -171,20 +171,21 @@ is missing or loads fewer than 1,000 style codes, startup fails immediately
 ```bash
 curl -X POST http://localhost:8000/api/check \
   -H 'Content-Type: application/json' \
+  -H 'X-API-Key: your_enrich_api_key' \
   -d '{"url": "https://www.atwoods.com/"}'
 ```
 
-**Endpoints:**
+**All endpoints require `X-API-Key` header matching `ENRICH_API_KEY` env var.**
 
 | Endpoint | What it does |
 |----------|-------------|
 | `POST /api/check` | Does this retailer sell Twisted X? Returns yes/no + SKUs found + confidence |
 | `POST /api/scrape` | Extract raw DOM product blocks (Celigo sends these to Claude) |
 | `POST /api/verify` | Anti-hallucination: cross-check LLM output against source blocks |
-| `GET /health` | Returns `{"status": "healthy", "timestamp": "..."}` |
+| `GET /health` | Returns `{"status": "healthy", "timestamp": "..."}` — no auth required |
 | `GET /api/test` | Smoke test — confirms SKU database is loaded |
 
-**Enrichment endpoints** (all require `X-API-Key` header matching `ENRICH_API_KEY` env var):
+**Enrichment endpoints** (also require `X-API-Key`):
 
 | Endpoint | What it does |
 |----------|-------------|
@@ -272,7 +273,7 @@ full list with descriptions. Key variables:
 | Variable | Required for | What it does |
 |----------|-------------|-------------|
 | `GOOGLE_PLACES_API_KEY` | Enrichment pipeline + enrich API | Google Places Text Search + Address Validation |
-| `ENRICH_API_KEY` | All `/api/enrich/*` endpoints | Shared secret — pass as `X-API-Key` header |
+| `ENRICH_API_KEY` | All API endpoints | Shared secret — pass as `X-API-Key` header on every request |
 | `SERPAPI_KEY` | Layer 3 retailer detection | SerpApi Google Search — bypasses bot protection on major retailers. Free tier: 100/month. Leave blank to skip Layer 3. |
 | `USE_SFTP` | Enrichment pipeline | `true` = SFTP mode, `false` = local files |
 | `INPUT_FILE` | Local mode | CSV to read (default: `QueryResults_837.csv`) |

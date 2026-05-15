@@ -13,6 +13,7 @@ sufficient due to false-positive risk (press mentions, 'brands we carry' pages).
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse as _urlparse
 
 from ._http_client import http_get
@@ -67,12 +68,16 @@ def http_first_check(url: str) -> dict:
         parsed = _urlparse(url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
 
-        for path in _TX_BRAND_PATHS:
-            brand_url = origin + path
-            result = _scan_url(brand_url, timeout=5)
-            if result is not None:
-                log.info("Layer 1 brand-page hit: %s", brand_url)
-                return result
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {
+                pool.submit(_scan_url, origin + path, 5): path
+                for path in _TX_BRAND_PATHS
+            }
+            for fut in as_completed(futures):
+                result = fut.result()
+                if result is not None:
+                    log.info("Layer 1 hit via %s", futures[fut])
+                    return result
 
         return {
             "success": True, "definitive": False, "proof": [], "blocked": False,

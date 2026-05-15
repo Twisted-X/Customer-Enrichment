@@ -18,6 +18,7 @@ kept here because it depends on the combined output of all three sources above
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime
 from typing import List
 from urllib.parse import urlparse as _urlparse
@@ -30,6 +31,10 @@ from ._search import search_netsuite, search_shopify_or_woo, search_generic
 from ._scanners import scan_page_for_skus, find_brand_in_product_context
 
 log = logging.getLogger(__name__)
+
+# Max simultaneous Chromium browsers — each takes ~200 MB RAM.
+# Callers beyond this limit block here until a slot is free.
+_BROWSER_SEMAPHORE = threading.Semaphore(3)
 
 # Desktop Chrome user-agent — most retailer sites work with this
 _DESKTOP_UA = (
@@ -61,60 +66,63 @@ def playwright_check(url: str, normalized: str, retailer_name: str) -> dict:
     base_url = f"{_urlparse(normalized).scheme}://{_urlparse(normalized).netloc}"
 
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=HEADLESS)
-            context = browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                user_agent=_DESKTOP_UA,
-                proxy=pw_proxy(),
-            )
-            page = context.new_page()
-
-            try:
-                log.info("Playwright check: %s (%s)", retailer_name, normalized)
-
-                # ── Step 1: Load homepage, detect platform and bot-blocking ──
-                _goto_safe(page, normalized, timeout=15_000)
-                page.wait_for_timeout(2_000)
-
-                is_blocked, blocked_reasons = detect_blocked(page)
-                platform = detect_platform(page, normalized)
-                log.info("Platform: %s | Blocked signals: %s", platform, is_blocked)
-
-                # ── Step 2: Platform-aware search ──
-                search_outcome = _run_search(page, platform, base_url, normalized)
-
-                # ── Step 3: Validation for online sales + footwear only ──
-                # skip_tx_check=True: the checker's own SKU scan (_run_search /
-                # _dual_page_scan) is the authoritative TX signal.  Running
-                # detect_twisted_x inside validate_url would be a duplicate pass
-                # that wastes 15-30 s and navigates the browser away from the
-                # search results page we just landed on.
-                _goto_safe(page, normalized, timeout=15_000)
-                page.wait_for_timeout(2_000)
-                validation = validate_url(normalized, page, skip_tx_check=True)
-
-                # ── Step 4: Dual-page SKU check (product page + homepage) ──
-                dual_scan, dual_brand_found, dual_brand_samples = _dual_page_scan(
-                    page, platform, base_url, normalized, search_outcome
+        log.info("Waiting for browser slot (%s)", retailer_name)
+        with _BROWSER_SEMAPHORE:
+            log.info("Browser slot acquired (%s)", retailer_name)
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=HEADLESS)
+                context = browser.new_context(
+                    viewport={"width": 1920, "height": 1080},
+                    user_agent=_DESKTOP_UA,
+                    proxy=pw_proxy(),
                 )
+                page = context.new_page()
 
-                # ── Step 5: Assemble result ──
-                result = _assemble_result(
-                    url=normalized,
-                    retailer_name=retailer_name,
-                    validation=validation,
-                    search_outcome=search_outcome,
-                    dual_scan=dual_scan,
-                    dual_brand_found=dual_brand_found,
-                    dual_brand_samples=dual_brand_samples,
-                    is_blocked=is_blocked,
-                    blocked_reasons=blocked_reasons,
-                    page=page,
-                )
+                try:
+                    log.info("Playwright check: %s (%s)", retailer_name, normalized)
 
-            finally:
-                browser.close()
+                    # ── Step 1: Load homepage, detect platform and bot-blocking ──
+                    _goto_safe(page, normalized, timeout=15_000)
+                    page.wait_for_timeout(2_000)
+
+                    is_blocked, blocked_reasons = detect_blocked(page)
+                    platform = detect_platform(page, normalized)
+                    log.info("Platform: %s | Blocked signals: %s", platform, is_blocked)
+
+                    # ── Step 2: Platform-aware search ──
+                    search_outcome = _run_search(page, platform, base_url, normalized)
+
+                    # ── Step 3: Validation for online sales + footwear only ──
+                    # skip_tx_check=True: the checker's own SKU scan (_run_search /
+                    # _dual_page_scan) is the authoritative TX signal.  Running
+                    # detect_twisted_x inside validate_url would be a duplicate pass
+                    # that wastes 15-30 s and navigates the browser away from the
+                    # search results page we just landed on.
+                    _goto_safe(page, normalized, timeout=15_000)
+                    page.wait_for_timeout(2_000)
+                    validation = validate_url(normalized, page, skip_tx_check=True)
+
+                    # ── Step 4: Dual-page SKU check (product page + homepage) ──
+                    dual_scan, dual_brand_found, dual_brand_samples = _dual_page_scan(
+                        page, platform, base_url, normalized, search_outcome
+                    )
+
+                    # ── Step 5: Assemble result ──
+                    result = _assemble_result(
+                        url=normalized,
+                        retailer_name=retailer_name,
+                        validation=validation,
+                        search_outcome=search_outcome,
+                        dual_scan=dual_scan,
+                        dual_brand_found=dual_brand_found,
+                        dual_brand_samples=dual_brand_samples,
+                        is_blocked=is_blocked,
+                        blocked_reasons=blocked_reasons,
+                        page=page,
+                    )
+
+                finally:
+                    browser.close()
 
     except Exception as exc:
         err = str(exc)

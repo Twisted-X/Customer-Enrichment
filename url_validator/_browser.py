@@ -74,9 +74,11 @@ def _try_fill_search_input(page: Page, search_term: str) -> bool:
                     inp.press("Enter")
                     page.wait_for_timeout(2000)
                     return True
-                except Exception:
+                except Exception as exc:
+                    log.debug("Search input fill failed for selector %r: %s", selector, exc)
                     continue
-        except Exception:
+        except Exception as exc:
+            log.debug("Search input query failed for selector %r: %s", selector, exc)
             continue
     return False
 
@@ -106,7 +108,8 @@ def _search_on_site(page: Page, search_term: str) -> bool:
                 page.wait_for_timeout(1000)
                 if _try_fill_search_input(page, search_term):
                     return True
-        except Exception:
+        except Exception as exc:
+            log.debug("Search icon click failed for selector %r: %s", icon_sel, exc)
             continue
 
     # Strategy 3: direct URL navigation.
@@ -147,10 +150,11 @@ def _search_on_site(page: Page, search_term: str) -> bool:
                         body_len = 0
                     if body_len > 300:
                         return True
-            except Exception:
+            except Exception as exc:
+                log.debug("Search URL navigation failed for %s: %s", search_url, exc)
                 continue
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("URL-based search strategy failed: %s", exc)
 
     return False
 
@@ -166,6 +170,7 @@ def _try_category_pages(page: Page, base_url: str) -> bool:
             page.wait_for_timeout(1000)
             if _check_brand_in_content(_body_text(page), page.content().lower()):
                 return True
-        except Exception:
+        except Exception as exc:
+            log.debug("Category page navigation failed for %s: %s", path, exc)
             continue
     return False

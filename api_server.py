@@ -143,7 +143,7 @@ def _check_url_sync(url: str) -> dict:
     return run_check(url)
 
 
-@app.post("/api/check", response_model=CheckResponse)
+@app.post("/api/check", response_model=CheckResponse, dependencies=[Depends(_require_enrich_key)])
 async def check_endpoint(request: CheckRequest):
     """
     Quick check: does this URL sell Twisted X products?
@@ -263,7 +263,8 @@ def _click_next_page(page, current_page_num: int = 1) -> bool:
             page.wait_for_load_state("domcontentloaded", timeout=15000)
             page.wait_for_timeout(2000)
             return page.url != current_url or _snapshot() != before
-        except Exception:
+        except Exception as exc:
+            log.debug("Pagination click failed: %s", exc)
             return False
 
     for sel in next_selectors:
@@ -327,7 +328,8 @@ def _click_next_page(page, current_page_num: int = 1) -> bool:
             page.go_back(timeout=10000, wait_until='domcontentloaded')
             page.wait_for_timeout(1000)
             return False
-        except Exception:
+        except Exception as exc:
+            log.debug("Pagination URL strategy failed: %s", exc)
             return False
 
     # Build candidate URLs for common patterns
@@ -444,7 +446,8 @@ def _navigate_to_best_tx_page(page, base_url: str) -> None:
         try:
             landed = p.url.lower()
             body   = p.inner_text('body').lower()
-        except Exception:
+        except Exception as exc:
+            log.debug("_page_is_tx_relevant body read failed: %s", exc)
             return False
         if any(phrase in body for phrase in _error_phrases):
             return False
@@ -469,7 +472,8 @@ def _navigate_to_best_tx_page(page, base_url: str) -> None:
                 best_score = score
                 best_url   = page.url   # use final landed URL (handles redirects)
             return _page_is_tx_relevant(page)
-        except Exception:
+        except Exception as exc:
+            log.debug("_goto_and_check failed for %s: %s", url, exc)
             return False
 
     # Try platform-specific URLs first — stop on the first with TX content.
@@ -489,8 +493,8 @@ def _navigate_to_best_tx_page(page, base_url: str) -> None:
         try:
             _goto_safe(page, best_url, timeout=12000)
             page.wait_for_timeout(2000)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("Navigate to best TX page failed (%s): %s", best_url, exc)
 
 
 def _scrape_url_sync(url: str, search_term: str = "Twisted X", max_pages: int = 15, timeout: int = 30000) -> dict:
@@ -607,7 +611,7 @@ def _scrape_url_sync(url: str, search_term: str = "Twisted X", max_pages: int = 
     return result
 
 
-@app.post("/api/scrape", response_model=ScrapeResponse)
+@app.post("/api/scrape", response_model=ScrapeResponse, dependencies=[Depends(_require_enrich_key)])
 async def scrape_endpoint(request: ScrapeRequestNew):
     """
     Scrape a URL and return product blocks (no LLM extraction).
@@ -637,7 +641,7 @@ async def scrape_endpoint(request: ScrapeRequestNew):
 # POST /api/verify — Verify LLM-extracted products
 # =============================================================================
 
-@app.post("/api/verify", response_model=VerifyResponse)
+@app.post("/api/verify", response_model=VerifyResponse, dependencies=[Depends(_require_enrich_key)])
 async def verify_endpoint(request: VerifyRequest):
     """
     Cross-check LLM-extracted products against original product blocks.
