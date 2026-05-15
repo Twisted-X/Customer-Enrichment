@@ -53,8 +53,6 @@ def test_semaphore_limits_to_3_concurrent(monkeypatch):
     page = _make_mock_page()
     mock_pw = _patch_playwright(page)
 
-    original_check = None
-
     def slow_validate(url, page, **kwargs):
         with lock:
             active[0] += 1

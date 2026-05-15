@@ -14,9 +14,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+_AUTH = {"X-API-Key": "test-key"}
+
+
 @pytest.fixture(scope="module")
 def client():
     """TestClient for the FastAPI app. Imported once per module."""
+    import os
+    os.environ.setdefault("ENRICH_API_KEY", "test-key")
     from api_server import app
     return TestClient(app)
 
@@ -94,35 +99,35 @@ class TestCheckEndpoint:
         }
 
     def test_missing_url_field_returns_422(self, client):
-        resp = client.post("/api/check", json={})
+        resp = client.post("/api/check", json={}, headers=_AUTH)
         assert resp.status_code == 422
 
     def test_valid_url_returns_200_with_mocked_check(self, client):
         url = "https://bootbarn.com"
         mock_result = self._mock_check_result(url, sells=True, retailer="bootbarn")
         with unittest.mock.patch("api_server._check_url_sync", return_value=mock_result):
-            resp = client.post("/api/check", json={"url": url})
+            resp = client.post("/api/check", json={"url": url}, headers=_AUTH)
         assert resp.status_code == 200
 
     def test_response_has_sells_twisted_x_field(self, client):
         url = "https://bootbarn.com"
         mock_result = self._mock_check_result(url, sells=True, retailer="bootbarn")
         with unittest.mock.patch("api_server._check_url_sync", return_value=mock_result):
-            data = client.post("/api/check", json={"url": url}).json()
+            data = client.post("/api/check", json={"url": url}, headers=_AUTH).json()
         assert "sells_twisted_x" in data
 
     def test_response_has_proof_list(self, client):
         url = "https://bootbarn.com"
         mock_result = self._mock_check_result(url, sells=True, retailer="bootbarn")
         with unittest.mock.patch("api_server._check_url_sync", return_value=mock_result):
-            data = client.post("/api/check", json={"url": url}).json()
+            data = client.post("/api/check", json={"url": url}, headers=_AUTH).json()
         assert isinstance(data.get("proof"), list)
 
     def test_no_sells_result(self, client):
         url = "https://unknownsite.com"
         mock_result = self._mock_check_result(url, sells=False, retailer="unknownsite")
         with unittest.mock.patch("api_server._check_url_sync", return_value=mock_result):
-            data = client.post("/api/check", json={"url": url}).json()
+            data = client.post("/api/check", json={"url": url}, headers=_AUTH).json()
         assert data["sells_twisted_x"] is False
 
 
@@ -135,7 +140,7 @@ class TestVerifyEndpoint:
     /api/verify is pure Python (no browser/network) — no mocking needed.
     """
     def test_missing_body_returns_422(self, client):
-        resp = client.post("/api/verify", json={})
+        resp = client.post("/api/verify", json={}, headers=_AUTH)
         assert resp.status_code == 422
 
     def test_valid_request_returns_200(self, client):
@@ -158,7 +163,7 @@ class TestVerifyEndpoint:
                 }
             ],
         }
-        resp = client.post("/api/verify", json=body)
+        resp = client.post("/api/verify", json=body, headers=_AUTH)
         assert resp.status_code == 200
 
     def test_verified_products_in_response(self, client):
@@ -173,7 +178,7 @@ class TestVerifyEndpoint:
                  "links": [], "images": []}
             ],
         }
-        data = client.post("/api/verify", json=body).json()
+        data = client.post("/api/verify", json=body, headers=_AUTH).json()
         assert "verified_products" in data
         assert "flagged_products" in data
         assert "verification_stats" in data
@@ -184,7 +189,7 @@ class TestVerifyEndpoint:
             "extracted_products": [],
             "original_products": [],
         }
-        data = client.post("/api/verify", json=body).json()
+        data = client.post("/api/verify", json=body, headers=_AUTH).json()
         assert data["verified_products"] == []
         assert data["flagged_products"] == []
 
@@ -200,8 +205,7 @@ class TestVerifyEndpoint:
                  "links": [], "images": []}
             ],
         }
-        data = client.post("/api/verify", json=body).json()
-        # Product name doesn't match block text → should be flagged
+        data = client.post("/api/verify", json=body, headers=_AUTH).json()
         stats = data["verification_stats"]
         assert stats["total_input"] == 1
 
@@ -236,20 +240,20 @@ class TestScrapeEndpoint:
         }
 
     def test_missing_url_returns_422(self, client):
-        resp = client.post("/api/scrape", json={})
+        resp = client.post("/api/scrape", json={}, headers=_AUTH)
         assert resp.status_code == 422
 
     def test_valid_url_returns_200_with_mocked_scrape(self, client):
         url = "https://bootbarn.com"
         mock_result = self._mock_scrape_result(url)
         with unittest.mock.patch("api_server._scrape_url_sync", return_value=mock_result):
-            resp = client.post("/api/scrape", json={"url": url})
+            resp = client.post("/api/scrape", json={"url": url}, headers=_AUTH)
         assert resp.status_code == 200
 
     def test_response_has_products_list(self, client):
         url = "https://bootbarn.com"
         mock_result = self._mock_scrape_result(url)
         with unittest.mock.patch("api_server._scrape_url_sync", return_value=mock_result):
-            data = client.post("/api/scrape", json={"url": url}).json()
+            data = client.post("/api/scrape", json={"url": url}, headers=_AUTH).json()
         assert "products" in data
         assert isinstance(data["products"], list)

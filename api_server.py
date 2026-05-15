@@ -10,10 +10,13 @@ Rearchitected for Celigo integration:
 """
 import asyncio
 import hmac
+import logging
 import os
 import time
 from datetime import datetime, timezone
 from typing import List, Optional
+
+log = logging.getLogger(__name__)
 
 # Idempotency cache for /api/enrich/batch — prevents re-burning Google API
 # quota when Celigo retries a timed-out request. Key → (response, expires_at).
